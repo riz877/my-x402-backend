@@ -8,7 +8,7 @@ exports.handler = async (event, context) => {
     scheme: "exact",
     network: "base",
     maxAmountRequired: "2000000", 
-    resource: event.path, 
+    resource: `https://\${event.headers.host}\${event.path}`, // Full public URL
     description: "Payment to access premium API data.",
     mimeType: "application/json",
 
