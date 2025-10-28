@@ -33,10 +33,14 @@ exports.handler = async (event, context) => {
 
 
   return {
-    statusCode: 402, // 
-    body: JSON.stringify(x402Response), // 
-    headers: {
-      'Content-Type': 'application/json'
-    }
-  };
+        statusCode: 402, 
+        body: JSON.stringify(x402Response), 
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Headers': 'Content-Type',
+          'Access-Control-Allow-Methods': 'GET, OPTIONS'
+        }
+      };
+
 };
