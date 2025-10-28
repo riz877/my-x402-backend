@@ -9,7 +9,7 @@ exports.handler = async (event, context) => {
     network: "base",
     maxAmountRequired: "2000000", 
     resource: `https://\${event.headers.host}\${event.path}`, // Full public URL
-    description: "Payment to access premium API data.",
+    description: "the hood runs deep in 402.every face got a story. by https://x.com/sanukek https://x402hood.xyz",
     mimeType: "application/json",
 
     
