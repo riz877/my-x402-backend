@@ -1,33 +1,46 @@
+// 
 exports.handler = async (event, context) => {
-  console.log("Function '/mint' triggered, sending 402 response...");
 
+  console.log("Function 'resource' triggered, sending 402 response...");
+
+  // 1. Buat objek 'Accepts'
   const paymentMethod = {
     scheme: "exact",
     network: "base",
-    maxAmountRequired: "2000000", // 2 USDC (6 decimals)
-    symbol: "USDC",
-    contract: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    maxAmountRequired: "2000000", 
+    resource: `https://\${event.headers.host}\${event.path}`, // Full public URL
     description: "Payment to access premium API data.",
     mimeType: "application/json",
-    payTo: "0xD95A8764AA0dD4018971DE4Bc2adC09193b8A3c2",
-    maxTimeoutSeconds: 600
+
+    
+    payTo: "0xD95A8764AA0dD4018971DE4Bc2adC09193b8A3c2", 
+
+    maxTimeoutSeconds: 600, 
+    asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", 
+
+    outputSchema: {
+      input: { type: "http", method: "GET" },
+      output: { message: "string", data: "object" }
+    }
   };
 
+ 
   const x402Response = {
     x402Version: 1,
     error: "Payment Required",
-    accepts: [paymentMethod],
-    payer: "0xD95A8764AA0dD4018971DE4Bc2adC09193b8A3c2"
+    accepts: [paymentMethod]
   };
 
+
   return {
-    statusCode: 402,
-    body: JSON.stringify(x402Response),
-    headers: {
-      "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Headers": "Content-Type",
-      "Access-Control-Allow-Methods": "GET, OPTIONS"
-    }
-  };
+        statusCode: 402, 
+        body: JSON.stringify(x402Response), 
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Headers': 'Content-Type',
+          'Access-Control-Allow-Methods': 'GET, OPTIONS'
+        }
+      };
+
 };
