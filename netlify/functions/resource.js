@@ -12,6 +12,7 @@ exports.handler = async (event, context) => {
     description: "the hood runs deep in 402.every face got a story. by https://x.com/sanukek https://x402hood.xyz",
     mimeType: "application/json",
 
+     image: "https://raw.githubusercontent.com/riz877/pic/refs/heads/main/G4SIxPcXEAAuo7O.jpg",
     
     payTo: "0xD95A8764AA0dD4018971DE4Bc2adC09193b8A3c2", 
 
