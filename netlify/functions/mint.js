@@ -12,7 +12,7 @@ exports.handler = async (event, context) => {
     network: "base", // blockchain yang dipakai (ganti ke "ethereum" kalau mainnet)
     maxAmountRequired: "2000000", // jumlah token (6 desimal kalau USDC = 2.0 USDC)
     resource: resourceUrl, // resource target → agent.js
-    description: "the hood runs deep in 402. every face got a story. by https://x402hood.xyz",
+    description: "the hood runs deep in 402. every face got a story. by https://x.com/sanukek https://x402hood.xyz",
     mimeType: "application/json",
     image: "https://raw.githubusercontent.com/riz877/pic/refs/heads/main/G4SIxPcXEAAuo7O.jpg",
     payTo: "0xD95A8764AA0dD4018971DE4Bc2adC09193b8A3c2", // alamat penerima
