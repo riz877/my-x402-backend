@@ -7,14 +7,15 @@ const {
   NFT_CONTRACT_ADDRESS
 } = process.env;
 
-// ✅ Setup provider & relayer wallet (Ethers v6 style)
+// Setup provider dan wallet relayer (pembayar gas)
 const provider = new JsonRpcProvider(PROVIDER_URL);
 const relayerWallet = new Wallet(RELAYER_PRIVATE_KEY, provider);
 
-// ✅ Contract ABIs
+// ABI kontrak yang dibutuhkan
 const usdcAbi = [
   "function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s)"
 ];
+
 const nftAbi = [
   "function mint(address _to, uint256 _mintAmount)"
 ];
@@ -24,26 +25,27 @@ module.exports = {
     const headers = {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Headers': 'Content-Type',
-      'Access-Control-Allow-Methods': 'POST, OPTIONS',
+      'Access-Control-Allow-Methods': 'POST, OPTIONS, GET',
     };
 
-    // ✅ Preflight CORS
+    // Preflight CORS
     if (event.httpMethod === 'OPTIONS')
       return { statusCode: 200, headers };
 
-    // ✅ Handle GET (optional test)
+    // Handle GET → Test
     if (event.httpMethod === 'GET') {
       return {
         statusCode: 200,
         headers,
-        body: JSON.stringify({ message: 'Agent function is live ✅' }),
+        body: JSON.stringify({ message: 'Agent function live ✅' }),
       };
     }
 
-    // ✅ Hanya izinkan POST
+    // Hanya izinkan POST
     if (event.httpMethod !== 'POST')
       return { statusCode: 405, headers, body: JSON.stringify({ error: 'Method Not Allowed' }) };
 
+    // Parse JSON body
     let body;
     try {
       body = JSON.parse(event.body);
@@ -53,7 +55,7 @@ module.exports = {
 
     console.log("📩 Received body:", body);
 
-    // ✅ Validasi input
+    // Validasi field dari x402scan
     if (!body.authorization || !body.resource || !body.resource.asset) {
       return {
         statusCode: 400,
@@ -71,7 +73,7 @@ module.exports = {
 
       console.log("🔗 Using resource asset:", resource.asset);
 
-      // ✅ Transfer USDC
+      // Transfer USDC dengan tanda tangan user
       const usdcContract = new Contract(resource.asset, usdcAbi, relayerWallet);
       const usdcTx = await usdcContract.transferWithAuthorization(
         auth.from, auth.to, auth.value,
@@ -82,14 +84,13 @@ module.exports = {
       await usdcTx.wait();
       console.log("✅ USDC TX confirmed");
 
-      // ✅ Mint NFT
+      // Mint NFT setelah transfer berhasil
       const nftContract = new Contract(NFT_CONTRACT_ADDRESS, nftAbi, relayerWallet);
       const mintTx = await nftContract.mint(auth.from, 1);
       console.log("🎨 Mint TX sent:", mintTx.hash);
       await mintTx.wait();
       console.log("✅ Mint TX confirmed");
 
-      // ✅ Success response
       return {
         statusCode: 200,
         headers,
