@@ -23,6 +23,7 @@ const NFT_ABI = [
 ];
 
 const USDC_ABI = [
+  "function receiveWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s) external",
   "function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s) external",
   "function balanceOf(address account) view returns (uint256)"
 ];
@@ -75,7 +76,7 @@ exports.handler = async (event, context) => {
   }
 
   // =======================================================
-  // 1. PAYMENT FLOW: Execute transferWithAuthorization & Mint
+  // 1. PAYMENT FLOW: Execute receiveWithAuthorization & Mint
   // =======================================================
   if (xPaymentHeader && event.httpMethod === 'POST') {
     console.log("=== PAYMENT VERIFICATION STARTED ===");
@@ -139,11 +140,11 @@ exports.handler = async (event, context) => {
         };
     }
 
-    // Execute the USDC transfer using transferWithAuthorization
+    // Execute the USDC transfer using receiveWithAuthorization
     try {
         const usdcContract = new Contract(USDC_ASSET_ADDRESS, USDC_ABI, relayerWallet);
         
-        // Split signature into v, r, s components using Signature.from()
+        // Split signature into v, r, s components
         const sig = Signature.from(signature);
         
         console.log("Signature components:");
@@ -151,11 +152,13 @@ exports.handler = async (event, context) => {
         console.log(`  r: ${sig.r}`);
         console.log(`  s: ${sig.s}`);
         
-        console.log("Executing transferWithAuthorization...");
+        console.log("Executing receiveWithAuthorization (anyone can submit, payment goes to X402 recipient)...");
         
-        const tx = await usdcContract.transferWithAuthorization(
-            authData.from,
-            authData.to,
+        // Use receiveWithAuthorization - this is for receiving payments
+        // The msg.sender (relayer) executes, but payment goes from 'from' to 'to'
+        const tx = await usdcContract.receiveWithAuthorization(
+            authData.from,      // from: user who signed
+            authData.to,        // to: X402 recipient (must be msg.sender for receiveWithAuthorization)
             authData.value,
             authData.validAfter,
             authData.validBefore,
@@ -180,6 +183,7 @@ exports.handler = async (event, context) => {
         
     } catch (error) {
         console.error("❌ USDC Transfer Failed:", error);
+        console.error("Full error:", JSON.stringify(error, null, 2));
         
         // Check if authorization was already used
         if (error.message && error.message.includes("authorization is used")) {
@@ -200,7 +204,21 @@ exports.handler = async (event, context) => {
             return {
                 statusCode: 403,
                 body: JSON.stringify({ 
-                    error: "Invalid signature in payment authorization"
+                    error: "Invalid signature. This might be a signing issue with the x402 client."
+                }),
+                headers: { 
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*'
+                }
+            };
+        }
+        
+        // Check for caller must be payee error
+        if (error.message && error.message.includes("caller must be the payee")) {
+            return {
+                statusCode: 500,
+                body: JSON.stringify({ 
+                    error: "Authorization method mismatch. The relayer must be the payment recipient for receiveWithAuthorization."
                 }),
                 headers: { 
                     'Content-Type': 'application/json',
