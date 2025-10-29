@@ -83,11 +83,13 @@ exports.handler = async (event, context) => {
     let userAddress;
     let usdcTxHash;
     let authData;
+    let signature;
+    let decodedPayload; // Declare at function scope
 
     try {
         // Decode X-Payment header
         const payloadJson = Buffer.from(xPaymentHeader, 'base64').toString('utf8');
-        const decodedPayload = JSON.parse(payloadJson);
+        decodedPayload = JSON.parse(payloadJson);
         
         console.log("DECODED PAYLOAD:", JSON.stringify(decodedPayload, null, 2));
         
@@ -97,7 +99,7 @@ exports.handler = async (event, context) => {
         }
         
         authData = decodedPayload.payload.authorization;
-        const signature = decodedPayload.payload.signature;
+        signature = decodedPayload.payload.signature;
         
         userAddress = authData.from;
         
@@ -149,7 +151,7 @@ exports.handler = async (event, context) => {
             authData.validAfter,
             authData.validBefore,
             authData.nonce,
-            decodedPayload.payload.signature
+            signature
         );
         
         usdcTxHash = tx.hash;
@@ -169,7 +171,7 @@ exports.handler = async (event, context) => {
         console.error("❌ USDC Transfer Failed:", error);
         
         // Check if authorization was already used
-        if (error.message.includes("FiatTokenV2: authorization is used")) {
+        if (error.message && error.message.includes("authorization is used")) {
             return {
                 statusCode: 409,
                 body: JSON.stringify({ 
