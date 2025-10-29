@@ -1,4 +1,4 @@
-const { ethers } = require('ethers');
+const { JsonRpcProvider, Wallet, Contract } = require('ethers');
 
 const {
   PROVIDER_URL,
@@ -6,15 +6,16 @@ const {
   NFT_CONTRACT_ADDRESS
 } = process.env;
 
+const provider = new JsonRpcProvider(PROVIDER_URL);
+const relayerWallet = new Wallet(RELAYER_PRIVATE_KEY, provider);
+
 const usdcAbi = [
   "function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s)"
 ];
+
 const nftAbi = [
   "function mint(address _to, uint256 _mintAmount)"
 ];
-
-const provider = new ethers.providers.JsonRpcProvider(PROVIDER_URL);
-const relayerWallet = new ethers.Wallet(RELAYER_PRIVATE_KEY, provider);
 
 module.exports = {
   handler: async (event) => {
@@ -40,7 +41,7 @@ module.exports = {
       const auth = body.authorization;
       const resource = body.resource;
 
-      const usdcContract = new ethers.Contract(resource.asset, usdcAbi, relayerWallet);
+      const usdcContract = new Contract(resource.asset, usdcAbi, relayerWallet);
       const usdcTx = await usdcContract.transferWithAuthorization(
         auth.from, auth.to, auth.value,
         auth.validAfter, auth.validBefore, auth.nonce,
@@ -48,7 +49,7 @@ module.exports = {
       );
       await usdcTx.wait();
 
-      const nftContract = new ethers.Contract(NFT_CONTRACT_ADDRESS, nftAbi, relayerWallet);
+      const nftContract = new Contract(NFT_CONTRACT_ADDRESS, nftAbi, relayerWallet);
       const mintTx = await nftContract.mint(auth.from, 1);
       await mintTx.wait();
 
