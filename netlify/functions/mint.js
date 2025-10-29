@@ -46,7 +46,6 @@ const getPayerAddressAndVerifyPayment = (receipt) => {
 
             // Verifikasi Pembayaran: Harus dikirim ke Agent dan merupakan alamat yang valid
             if (recipientLogAddress.toLowerCase() === X402_RECIPIENT_ADDRESS.toLowerCase() && isAddress(payerAddress)) {
-                // Catatan: Di sini idealnya kita juga verifikasi log.data (jumlah transfer)
                 // Kita asumsikan jumlah transfer $2.00 sudah dicakup oleh proses Agent AI klien.
                 return payerAddress;
             }
@@ -87,17 +86,26 @@ exports.handler = async (event, context) => {
         const payloadJson = Buffer.from(xPaymentHeader, 'base64').toString('utf8');
         const decodedPayload = JSON.parse(payloadJson);
         
-        // --- START PERBAIKAN PENCARIAN TX HASH ---
-        // Mengatasi error 'Missing transaction hash' dengan mencari secara agresif
+        // --- LOG KRITIS: TAMPILKAN SELURUH PAYLOAD DECODED ---
+        // Ini akan sangat membantu debugging jika error masih terjadi
+        console.log("PAYLOAD DECODED:", JSON.stringify(decodedPayload)); 
+        // -----------------------------------------------------
+        
+        // --- PERBAIKAN PENCARIAN TX HASH AGRESIF ---
+        // Mencari Tx Hash dari berbagai kunci yang mungkin (termasuk 402Scan)
         const proof = decodedPayload.proof || decodedPayload; 
         txHash = proof.txHash || 
                  proof.transactionHash || 
-                 decodedPayload.hash || 
+                 proof.hash || 
+                 proof.transactionId || 
+                 proof.txId ||
+                 decodedPayload.hash || // Cek di root level juga
                  decodedPayload.transactionId ||
-                 decodedPayload.txId; // Tambahkan 'txId' dan 'decodedPayload.txId' untuk kompatibilitas
-        // --- END PERBAIKAN PENCARIAN TX HASH ---
+                 decodedPayload.txId; 
+        // --- END PERBAIKAN ---
 
         if (!txHash) {
+            console.error("Gagal menemukan TxHash. Objek proof:", JSON.stringify(proof)); 
             throw new Error("Missing transaction hash in payment proof.");
         }
 
