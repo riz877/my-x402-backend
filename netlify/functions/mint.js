@@ -13,114 +13,44 @@ const {
   RELAYER_PRIVATE_KEY,
 } = process.env;
 
-// Initialize Provider and Wallet (for gas-sponsored minting)
+// Initialize Provider and Wallet
 const provider = new JsonRpcProvider(PROVIDER_URL || "https://mainnet.base.org");
 const relayerWallet = new Wallet(RELAYER_PRIVATE_KEY, provider);
 
-// MINIMAL ABI
+// ABIs
 const NFT_ABI = [
   "function mint(address _to, uint256 _mintAmount)"
 ];
 
-// TOPIC HASH for Transfer(address indexed from, address indexed to, uint256 value)
+const USDC_ABI = [
+  "function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, bytes signature) external",
+  "function balanceOf(address account) view returns (uint256)"
+];
+
+// TOPIC HASH for Transfer event
 const USDC_TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 
-// --- UTILITY: Extract transaction hash from payment proof ---
-const extractTxHash = (payload) => {
-  console.log("=== EXTRACTING TX HASH ===");
-  console.log("Full payload:", JSON.stringify(payload, null, 2));
-  
-  // Try direct properties first
-  if (payload.transactionHash) return payload.transactionHash;
-  if (payload.txHash) return payload.txHash;
-  if (payload.hash) return payload.hash;
-  if (payload.tx) return payload.tx;
-  if (payload.txId) return payload.txId;
-  if (payload.transactionId) return payload.transactionId;
-  
-  // Try proof object
-  if (payload.proof) {
-    const proof = payload.proof;
-    if (proof.transactionHash) return proof.transactionHash;
-    if (proof.txHash) return proof.txHash;
-    if (proof.hash) return proof.hash;
-    if (proof.tx) return proof.tx;
-    if (proof.txId) return proof.txId;
-    if (proof.transactionId) return proof.transactionId;
-  }
-  
-  // Try payment object
-  if (payload.payment) {
-    const payment = payload.payment;
-    if (payment.transactionHash) return payment.transactionHash;
-    if (payment.txHash) return payment.txHash;
-    if (payment.hash) return payment.hash;
-    if (payment.tx) return payment.tx;
-  }
-  
-  // Try transaction object
-  if (payload.transaction) {
-    const tx = payload.transaction;
-    if (tx.hash) return tx.hash;
-    if (tx.transactionHash) return tx.transactionHash;
-    if (tx.txHash) return tx.txHash;
-  }
-  
-  // Try data object
-  if (payload.data) {
-    const data = payload.data;
-    if (typeof data === 'string') return data; // Sometimes it's just a string
-    if (data.transactionHash) return data.transactionHash;
-    if (data.txHash) return data.txHash;
-    if (data.hash) return data.hash;
-  }
-  
-  // If payload is just a string (transaction hash directly)
-  if (typeof payload === 'string' && payload.startsWith('0x')) {
-    return payload;
-  }
-  
-  console.log("❌ Could not find transaction hash in any known location");
-  return null;
-};
-
-// --- UTILITY FUNCTION: Get Payer Address from Transfer Log ---
-const getPayerAddressAndVerifyPayment = (receipt) => {
+// --- UTILITY FUNCTION: Verify USDC Transfer in Receipt ---
+const getPayerAddressFromReceipt = (receipt, expectedFrom) => {
     console.log("Checking transaction logs for USDC transfer...");
     
     for (const log of receipt.logs) {
-        // Check if this is a USDC transfer log
         if (log.address.toLowerCase() === USDC_ASSET_ADDRESS.toLowerCase() && 
             log.topics[0] === USDC_TRANSFER_TOPIC) {
             
-            console.log("Found USDC transfer log:", log);
+            const fromAddress = '0x' + log.topics[1].substring(26);
+            const toAddress = '0x' + log.topics[2].substring(26);
+            const amount = BigInt(log.data);
             
-            // Extract sender address from topic[1] (FROM) - This is the user who paid
-            const senderTopic = log.topics[1]; 
-            const payerAddress = '0x' + senderTopic.substring(26); 
+            console.log(`Transfer: ${fromAddress} → ${toAddress}, Amount: ${amount.toString()}`);
             
-            // Extract recipient address from topic[2] (TO) - Should be x402 recipient
-            const recipientTopic = log.topics[2];
-            const recipientLogAddress = '0x' + recipientTopic.substring(26);
-
-            console.log(`User who paid: ${payerAddress}, Received at: ${recipientLogAddress}`);
-
-            // Verify payment was sent to the x402 recipient address
-            if (recipientLogAddress.toLowerCase() === X402_RECIPIENT_ADDRESS.toLowerCase() && 
-                isAddress(payerAddress)) {
+            // Verify: correct sender, correct recipient, correct amount
+            if (fromAddress.toLowerCase() === expectedFrom.toLowerCase() &&
+                toAddress.toLowerCase() === X402_RECIPIENT_ADDRESS.toLowerCase() &&
+                amount >= BigInt(MINT_COST_USDC)) {
                 
-                // Verify amount (data field contains the value)
-                const amountHex = log.data;
-                const amount = BigInt(amountHex);
-                
-                console.log(`Transfer amount: ${amount.toString()} (required: ${MINT_COST_USDC})`);
-                
-                if (amount >= BigInt(MINT_COST_USDC)) {
-                    console.log(`✅ Valid payment of ${amount.toString()} USDC from ${payerAddress}`);
-                    return payerAddress; // Return the user who paid
-                } else {
-                    console.warn(`❌ Payment amount ${amount.toString()} is less than required ${MINT_COST_USDC}`);
-                }
+                console.log(`✅ Valid USDC transfer verified`);
+                return fromAddress;
             }
         }
     }
@@ -132,7 +62,7 @@ exports.handler = async (event, context) => {
   const xPaymentHeader = event.headers['x-payment'] || event.headers['X-Payment'];
   const resourceUrl = `https://${event.headers.host}${event.path}`; 
 
-  // CORS/OPTIONS LOGIC
+  // CORS/OPTIONS
   if (event.httpMethod === 'OPTIONS') {
     return {
       statusCode: 204,
@@ -145,84 +75,59 @@ exports.handler = async (event, context) => {
   }
 
   // =======================================================
-  // 1. SUCCESS LOGIC: User paid USDC, now mint NFT to them (POST)
+  // 1. PAYMENT FLOW: Execute transferWithAuthorization & Mint
   // =======================================================
   if (xPaymentHeader && event.httpMethod === 'POST') {
     console.log("=== PAYMENT VERIFICATION STARTED ===");
-    console.log("X-PAYMENT header found");
-    console.log("Raw header value:", xPaymentHeader);
 
-    let txHash;
     let userAddress;
-    let decodedPayload;
+    let usdcTxHash;
+    let authData;
 
-    // 1.1 Verify X-Payment Payload and On-Chain
     try {
-        // Decode base64 payload
-        let payloadJson;
-        try {
-          payloadJson = Buffer.from(xPaymentHeader, 'base64').toString('utf8');
-          console.log("Decoded payload string:", payloadJson);
-        } catch (decodeError) {
-          console.error("Base64 decode error:", decodeError);
-          throw new Error("Failed to decode X-Payment header from base64");
+        // Decode X-Payment header
+        const payloadJson = Buffer.from(xPaymentHeader, 'base64').toString('utf8');
+        const decodedPayload = JSON.parse(payloadJson);
+        
+        console.log("DECODED PAYLOAD:", JSON.stringify(decodedPayload, null, 2));
+        
+        // Extract authorization data
+        if (!decodedPayload.payload || !decodedPayload.payload.authorization) {
+            throw new Error("Missing authorization data in payment proof");
         }
         
-        // Parse JSON
-        try {
-          decodedPayload = JSON.parse(payloadJson);
-        } catch (parseError) {
-          console.error("JSON parse error:", parseError);
-          throw new Error("X-Payment header is not valid JSON");
+        authData = decodedPayload.payload.authorization;
+        const signature = decodedPayload.payload.signature;
+        
+        userAddress = authData.from;
+        
+        console.log(`User Address: ${userAddress}`);
+        console.log(`Payment To: ${authData.to}`);
+        console.log(`Amount: ${authData.value}`);
+        console.log(`Nonce: ${authData.nonce}`);
+        
+        // Verify authorization details
+        if (authData.to.toLowerCase() !== X402_RECIPIENT_ADDRESS.toLowerCase()) {
+            throw new Error("Authorization recipient does not match expected address");
         }
         
-        console.log("=== PARSED PAYLOAD ===");
-        console.log(JSON.stringify(decodedPayload, null, 2));
+        if (authData.value !== MINT_COST_USDC) {
+            throw new Error(`Incorrect payment amount. Expected ${MINT_COST_USDC}, got ${authData.value}`);
+        }
         
-        // Extract transaction hash using helper function
-        txHash = extractTxHash(decodedPayload);
-
-        if (!txHash) {
-            console.error("❌ All extraction methods failed");
-            console.error("Available keys in payload:", Object.keys(decodedPayload));
-            throw new Error("Missing transaction hash in payment proof. Please check the payment format.");
+        // Check if user is valid address
+        if (!isAddress(userAddress)) {
+            throw new Error("Invalid user address");
         }
 
-        console.log(`✅ Extracted transaction hash: ${txHash}`);
-        console.log(`Verifying USDC payment transaction on Base network...`);
-
-        // On-Chain Verification: Check transaction status
-        const receipt = await provider.getTransactionReceipt(txHash);
-
-        if (!receipt) {
-            throw new Error(`Transaction ${txHash} not found on Base network. It may still be pending.`);
-        }
-
-        if (receipt.status !== 1) {
-            throw new Error(`Transaction ${txHash} failed on-chain (status: ${receipt.status}).`);
-        }
-
-        console.log(`✅ Transaction confirmed in block: ${receipt.blockNumber}`);
-
-        // 1.2 Extract the user's address from the USDC transfer logs
-        userAddress = getPayerAddressAndVerifyPayment(receipt);
-        
-        if (!userAddress) {
-            throw new Error("Could not verify USDC payment. Ensure you sent exactly 2 USDC to the correct address.");
-        }
-
-        console.log(`✅ Payment verified! User ${userAddress} paid USDC`);
+        console.log("✅ Authorization data validated");
 
     } catch (error) {
-        console.error("❌ Payment Verification Failed:", error);
+        console.error("❌ Payment Proof Validation Failed:", error);
         return {
             statusCode: 403,
             body: JSON.stringify({ 
-                error: `Invalid or unverified payment: ${error.message}`,
-                debug: {
-                  headerReceived: !!xPaymentHeader,
-                  payloadKeys: decodedPayload ? Object.keys(decodedPayload) : null
-                }
+                error: `Invalid payment proof: ${error.message}`
             }),
             headers: { 
                 'Content-Type': 'application/json',
@@ -231,29 +136,85 @@ exports.handler = async (event, context) => {
         };
     }
 
-    // 1.3 MINT NFT TO THE USER (Relayer pays gas, user gets NFT)
+    // Execute the USDC transfer using transferWithAuthorization
+    try {
+        const usdcContract = new Contract(USDC_ASSET_ADDRESS, USDC_ABI, relayerWallet);
+        
+        console.log("Executing transferWithAuthorization...");
+        
+        const tx = await usdcContract.transferWithAuthorization(
+            authData.from,
+            authData.to,
+            authData.value,
+            authData.validAfter,
+            authData.validBefore,
+            authData.nonce,
+            decodedPayload.payload.signature
+        );
+        
+        usdcTxHash = tx.hash;
+        console.log(`USDC Transfer TX sent: ${usdcTxHash}`);
+        
+        const receipt = await tx.wait();
+        console.log(`✅ USDC Transfer confirmed in block ${receipt.blockNumber}`);
+        
+        // Verify the transfer in the receipt
+        const verifiedPayer = getPayerAddressFromReceipt(receipt, userAddress);
+        
+        if (!verifiedPayer) {
+            throw new Error("USDC transfer not found in transaction receipt");
+        }
+        
+    } catch (error) {
+        console.error("❌ USDC Transfer Failed:", error);
+        
+        // Check if authorization was already used
+        if (error.message.includes("FiatTokenV2: authorization is used")) {
+            return {
+                statusCode: 409,
+                body: JSON.stringify({ 
+                    error: "This payment authorization has already been used"
+                }),
+                headers: { 
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*'
+                }
+            };
+        }
+        
+        return {
+            statusCode: 500,
+            body: JSON.stringify({ 
+                error: "Failed to execute USDC transfer",
+                details: error.message
+            }),
+            headers: { 
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+            }
+        };
+    }
+
+    // Mint NFT to user
     try {
         const nftContract = new Contract(NFT_CONTRACT_ADDRESS, NFT_ABI, relayerWallet);
         
-        console.log(`Minting NFT to user: ${userAddress} (relayer pays gas)...`);
+        console.log(`Minting NFT to ${userAddress}...`);
         
-        // Mint to the user who paid USDC
-        const tx = await nftContract.mint(userAddress, 1); 
-
-        console.log(`Mint transaction sent: ${tx.hash}`);
+        const mintTx = await nftContract.mint(userAddress, 1);
+        console.log(`Mint TX sent: ${mintTx.hash}`);
         
-        const mintReceipt = await tx.wait(); 
-
-        console.log(`✅ NFT Minted Successfully! Block: ${mintReceipt.blockNumber}`);
+        const mintReceipt = await mintTx.wait();
+        console.log(`✅ NFT Minted in block ${mintReceipt.blockNumber}`);
 
         return {
             statusCode: 200,
             body: JSON.stringify({
-                message: "NFT Minted Successfully!",
+                message: "Payment received and NFT minted successfully!",
                 data: { 
-                    recipient: userAddress, 
-                    mintTransactionHash: tx.hash,
-                    paymentTransactionHash: txHash,
+                    recipient: userAddress,
+                    usdcTransferHash: usdcTxHash,
+                    mintTransactionHash: mintTx.hash,
                     blockNumber: mintReceipt.blockNumber
                 }
             }),
@@ -262,13 +223,17 @@ exports.handler = async (event, context) => {
                 'Access-Control-Allow-Origin': '*' 
             }
         };
+        
     } catch (error) {
         console.error("❌ NFT Minting Failed:", error);
+        
+        // Payment succeeded but minting failed - this is a critical error
         return {
             statusCode: 500,
             body: JSON.stringify({ 
-                error: "Failed to mint NFT. User payment was verified but minting failed.",
-                details: error.message 
+                error: "USDC payment succeeded but NFT minting failed. Please contact support.",
+                usdcTransferHash: usdcTxHash,
+                details: error.message
             }),
             headers: { 
                 'Content-Type': 'application/json',
@@ -279,7 +244,7 @@ exports.handler = async (event, context) => {
   }
 
   // =======================================================
-  // 2. CHALLENGE LOGIC: Return 402 Payment Required (GET/Default)
+  // 2. CHALLENGE: Return 402 Payment Required
   // =======================================================
   else {
     console.log(`🚀 Returning 402 Payment Required for ${resourceUrl}`);
@@ -287,7 +252,7 @@ exports.handler = async (event, context) => {
     const paymentMethod = {
         scheme: "exact",
         network: "base",
-        maxAmountRequired: MINT_COST_USDC, 
+        maxAmountRequired: MINT_COST_USDC,
         resource: resourceUrl,
         description: "the hood runs deep in 402. every face got a story. Pay 2 USDC to mint your NFT. by https://x.com/sanukek https://x402hood.xyz",
         mimeType: "application/json",
