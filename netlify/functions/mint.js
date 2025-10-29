@@ -1,123 +1,102 @@
 // File: netlify/functions/mint.js
 const { JsonRpcProvider, Wallet, Contract } = require("ethers");
 
-// === ENVIRONMENT VARIABLES ===
 const {
   PROVIDER_URL,
   RELAYER_PRIVATE_KEY,
-  NFT_CONTRACT_ADDRESS,
+  NFT_CONTRACT_ADDRESS
 } = process.env;
 
-// Setup provider dan wallet relayer (pembayar gas)
+// setup provider & relayer wallet
 const provider = new JsonRpcProvider(PROVIDER_URL);
-const relayerWallet = new Wallet(RELAYER_PRIVATE_KEY, provider);
+const relayer = new Wallet(RELAYER_PRIVATE_KEY, provider);
 
-// ABI kontrak yang dibutuhkan
+// ABIs
 const usdcAbi = [
-  "function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s)",
+  "function transferWithAuthorization(address from, address to, uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce,uint8 v,bytes32 r,bytes32 s)"
 ];
-
-const nftAbi = ["function mint(address _to, uint256 _mintAmount)"];
+const nftAbi = [
+  "function mint(address _to, uint256 _mintAmount)"
+];
 
 exports.handler = async (event) => {
   const headers = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type",
-    "Access-Control-Allow-Methods": "POST, OPTIONS, GET",
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS"
   };
 
-  // ==== Preflight CORS ====
-  if (event.httpMethod === "OPTIONS") {
+  // Handle preflight
+  if (event.httpMethod === "OPTIONS")
     return { statusCode: 200, headers };
-  }
 
-  // ==== Handle GET → return 402 Payment Required ====
+  // Handle GET → x402scan akan nerima ini
   if (event.httpMethod === "GET") {
-    console.log("🚀 Function 'mint' triggered → returning 402 Payment Required...");
+    console.log("🚀 GET mint called → returning 402 Payment Required");
 
     const resourceUrl = `https://${event.headers.host}/.netlify/functions/mint`;
 
     const paymentMethod = {
       scheme: "exact",
-      network: "base", // ganti ke "ethereum" kalau di mainnet
-      maxAmountRequired: "2000000", // 2.0 USDC (6 desimal)
+      network: "base",
+      maxAmountRequired: "2000000", // 2 USDC (6 decimals)
       resource: resourceUrl,
       description:
         "the hood runs deep in 402. every face got a story. by https://x.com/sanukek https://x402hood.xyz",
       mimeType: "application/json",
       image:
         "https://raw.githubusercontent.com/riz877/pic/refs/heads/main/G4SIxPcXEAAuo7O.jpg",
-      payTo: "0xD95A8764AA0dD4018971DE4Bc2adC09193b8A3c2",
+      payTo: "0xD95A8764AA0dD4018971DE4Bc2adC09193b8A3c2", // penerima
       maxTimeoutSeconds: 600,
-      asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", // USDC Base
+      asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", // USDC (Base)
       outputSchema: {
         input: { type: "http", method: "POST" },
-        output: { message: "string", data: "object" },
-      },
-    };
-
-    const x402Response = {
-      x402Version: 1,
-      error: "Payment Required",
-      accepts: [paymentMethod],
+        output: { message: "string", data: "object" }
+      }
     };
 
     return {
       statusCode: 402,
       headers,
-      body: JSON.stringify(x402Response),
+      body: JSON.stringify({
+        x402Version: 1,
+        error: "Payment Required",
+        accepts: [paymentMethod]
+      })
     };
   }
 
-  // ==== Handle POST ====
-  if (event.httpMethod !== "POST") {
+  // Hanya POST buat handle klaim
+  if (event.httpMethod !== "POST")
     return {
       statusCode: 405,
       headers,
-      body: JSON.stringify({ error: "Method Not Allowed" }),
+      body: JSON.stringify({ error: "Method Not Allowed" })
     };
+
+  // Cek body
+  if (!event.body) {
+    console.error("❌ Empty body received");
+    return { statusCode: 400, headers, body: "Empty body" };
   }
 
-  // === SAFE JSON PARSE ===
   let body;
   try {
-    // kadang x402scan atau Netlify udah parse otomatis
-    if (!event.body) {
-      console.error("❌ Empty body received");
-      return { statusCode: 400, headers, body: "Empty body" };
-    }
-
-    console.log("📦 Raw body:", event.body);
-
-    if (typeof event.body === "object") {
-      // Netlify runtime baru kadang auto-parse
-      body = event.body;
-    } else if (typeof event.body === "string") {
-      // Bisa jadi Base64 encoded
-      const parsed =
-        event.isBase64Encoded === true
-          ? Buffer.from(event.body, "base64").toString("utf8")
-          : event.body;
-      body = JSON.parse(parsed);
-    } else {
-      throw new Error("Unknown body type");
-    }
+    body = JSON.parse(event.body);
   } catch (err) {
-    console.error("❌ JSON parse error:", err);
+    console.error("❌ Invalid JSON:", err);
     return { statusCode: 400, headers, body: "Invalid JSON body" };
   }
 
-  console.log("📩 Parsed body:", body);
-
-  // === Validasi field dari x402scan ===
+  // validasi field
   if (!body.authorization || !body.resource || !body.resource.asset) {
+    console.error("❌ Missing required fields:", body);
     return {
       statusCode: 400,
       headers,
       body: JSON.stringify({
-        error: "Missing required fields (authorization/resource.asset)",
-        received: body,
-      }),
+        error: "Missing required fields (authorization/resource.asset)"
+      })
     };
   }
 
@@ -125,11 +104,11 @@ exports.handler = async (event) => {
     const auth = body.authorization;
     const resource = body.resource;
 
-    console.log("🔗 Using resource asset:", resource.asset);
+    console.log("🔗 Using asset:", resource.asset);
 
-    // === Transfer USDC dengan tanda tangan user ===
-    const usdcContract = new Contract(resource.asset, usdcAbi, relayerWallet);
-    const usdcTx = await usdcContract.transferWithAuthorization(
+    // Transfer USDC — user signed, relayer executes (user funds, relayer pays gas)
+    const usdc = new Contract(resource.asset, usdcAbi, relayer);
+    const usdcTx = await usdc.transferWithAuthorization(
       auth.from,
       auth.to,
       auth.value,
@@ -140,17 +119,14 @@ exports.handler = async (event) => {
       auth.r,
       auth.s
     );
+
     console.log("💸 USDC TX sent:", usdcTx.hash);
     await usdcTx.wait();
     console.log("✅ USDC TX confirmed");
 
-    // === Mint NFT setelah transfer berhasil ===
-    const nftContract = new Contract(
-      NFT_CONTRACT_ADDRESS,
-      nftAbi,
-      relayerWallet
-    );
-    const mintTx = await nftContract.mint(auth.from, 1);
+    // Mint NFT setelah transfer sukses
+    const nft = new Contract(NFT_CONTRACT_ADDRESS, nftAbi, relayer);
+    const mintTx = await nft.mint(auth.from, 1);
     console.log("🎨 Mint TX sent:", mintTx.hash);
     await mintTx.wait();
     console.log("✅ Mint TX confirmed");
@@ -160,19 +136,16 @@ exports.handler = async (event) => {
       headers,
       body: JSON.stringify({
         message: "Claim successful!",
-        usdcTransactionHash: usdcTx.hash,
-        mintTransactionHash: mintTx.hash,
-      }),
+        usdcTx: usdcTx.hash,
+        mintTx: mintTx.hash
+      })
     };
   } catch (err) {
-    console.error("❌ Mint function failed:", err);
+    console.error("❌ Handler failed:", err);
     return {
       statusCode: 500,
       headers,
-      body: JSON.stringify({
-        error: err.message || "Internal server error.",
-        stack: err.stack,
-      }),
+      body: JSON.stringify({ error: err.message || "Internal Server Error" })
     };
   }
 };
