@@ -87,9 +87,15 @@ exports.handler = async (event, context) => {
         const payloadJson = Buffer.from(xPaymentHeader, 'base64').toString('utf8');
         const decodedPayload = JSON.parse(payloadJson);
         
-        // Mencari Tx Hash secara agresif (untuk mengatasi error 4ebf1a.png)
+        // --- START PERBAIKAN PENCARIAN TX HASH ---
+        // Mengatasi error 'Missing transaction hash' dengan mencari secara agresif
         const proof = decodedPayload.proof || decodedPayload; 
-        txHash = proof.txHash || proof.transactionHash || decodedPayload.hash || decodedPayload.transactionId;
+        txHash = proof.txHash || 
+                 proof.transactionHash || 
+                 decodedPayload.hash || 
+                 decodedPayload.transactionId ||
+                 decodedPayload.txId; // Tambahkan 'txId' dan 'decodedPayload.txId' untuk kompatibilitas
+        // --- END PERBAIKAN PENCARIAN TX HASH ---
 
         if (!txHash) {
             throw new Error("Missing transaction hash in payment proof.");
