@@ -1,155 +1,70 @@
-// File: netlify/functions/mint.js
+// --- KODE JAVASCRIPT DI SISI BROWSER (KLIEN) ---
 
-const { JsonRpcProvider, Wallet, Contract } = require('ethers');
+// Ganti dengan URL Netlify Function Anda yang sebenarnya
+const NETLIFY_MINT_URL = 'https://mint.x402hood.xyz/.netlify/functions/mint'; 
 
-// --- Konfigurasi Lingkungan ---
-const {
-  PROVIDER_URL,
-  RELAYER_PRIVATE_KEY,
-  NFT_CONTRACT_ADDRESS
-} = process.env;
-
-// URL Block Explorer untuk jaringan Base
-const BASE_EXPLORER_URL = 'https://basescan.org/tx/';
-
-// Setup provider dan relayer wallet (pembayar gas)
-const provider = new JsonRpcProvider(PROVIDER_URL);
-const relayerWallet = new Wallet(RELAYER_PRIVATE_KEY, provider);
-
-// ABI kontrak yang dibutuhkan
-const usdcAbi = [
-  "function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s)"
-]; // <-- Array tertutup sempurna
-
-const nftAbi = [
-  "function mint(address _to, uint256 _mintAmount)"
-]; // <-- Array tertutup sempurna
-
-// **************************** HANDLER FUNCTION ****************************
-
-module.exports.handler = async (event, context) => {
-  const headers = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type',
-    'Access-Control-Allow-Methods': 'GET, OPTIONS, POST',
-    'Content-Type': 'application/json'
-  };
-
-  // Handle CORS preflight
-  if (event.httpMethod === 'OPTIONS')
-    return { statusCode: 200, headers };
-
-
-  // --- Logika GET: Respon 402 (Permintaan Harga) ---
-  if (event.httpMethod === 'GET') {
-    console.log("🚀 Function 'mint' triggered (GET) → returning 402 Payment Required...");
-
-    const resourceUrl = `https://${event.headers.host}${event.path}`;
-
-    const paymentMethod = {
-      scheme: "exact",
-      network: "base",
-      maxAmountRequired: "2000000",
-      resource: resourceUrl,
-      // Deskripsi dikembalikan
-      description: "the hood runs deep in 402. every face got a story. by https://x.com/sanukek https://x402hood.xyz",
-      mimeType: "application/json",
-      image: "https://raw.githubusercontent.com/riz877/pic/refs/heads/main/G4SIxPcXEAAuo7O.jpg",
-      payTo: "0xD95A8764AA0dD4018971DE4Bc2adC09193b8A3c2",
-      maxTimeoutSeconds: 600,
-      asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", // USDC (Base)
-      outputSchema: {
-        input: { type: "http", method: "POST" },
-        output: { message: "string", data: "object" }
-      }
+/**
+ * Fungsi aman untuk memanggil endpoint minting. Membaca body hanya sekali (response.json()).
+ * @param {object} payload - Payload otorisasi pembayaran (null untuk permintaan GET)
+ */
+async function callMintEndpointReadOnce(payload = null) {
+    const method = payload ? 'POST' : 'GET';
+    
+    const fetchOptions = {
+        method: method,
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: payload ? JSON.stringify(payload) : undefined,
     };
-
-    const x402Response = {
-      x402Version: 1,
-      error: "Payment Required",
-      accepts: [paymentMethod]
-    };
-
-    return {
-      statusCode: 402,
-      body: JSON.stringify(x402Response),
-      headers,
-    };
-  }
-
-
-  // --- Logika POST: Pemrosesan Pembayaran & Minting ---
-  if (event.httpMethod === 'POST') {
-    let body;
-    try {
-      body = JSON.parse(event.body);
-    } catch {
-      return { statusCode: 400, headers, body: 'Invalid JSON body' };
-    }
-
-    // Input validation
-    if (!body.authorization || !body.resource || !body.resource.asset) {
-      return {
-        statusCode: 400,
-        headers,
-        body: JSON.stringify({
-          error: "Missing required fields (authorization/resource.asset)",
-          received: body,
-        }),
-      };
-    }
 
     try {
-      const auth = body.authorization;
-      const resource = body.resource;
+        const response = await fetch(NETLIFY_MINT_URL, fetchOptions);
 
-      // 1. Transfer USDC dengan tanda tangan user
-      const usdcContract = new Contract(resource.asset, usdcAbi, relayerWallet);
-      const usdcTx = await usdcContract.transferWithAuthorization(
-        auth.from, auth.to, auth.value,
-        auth.validAfter, auth.validBefore, auth.nonce,
-        auth.v, auth.r, auth.s
-      );
-      console.log("💸 USDC TX sent:", usdcTx.hash);
-      await usdcTx.wait();
-      console.log("✅ USDC TX confirmed");
+        // *** Langkah Kunci: Baca body HANYA SEKALI, simpan hasilnya ***
+        let responseData;
+        try {
+            // Coba baca sebagai JSON (untuk 200 OK dan 402 Payment Required)
+            responseData = await response.json(); 
+        } catch (e) {
+            // Jika parsing JSON gagal (misalnya, server 500 mengirim teks mentah), 
+            // baca sebagai teks
+            responseData = await response.text(); 
+            // Catatan: Jika response.ok (misal 200) tapi bukan JSON, 
+            // ini mungkin menunjukkan masalah format data.
+        }
+        // -------------------------------------------------------------
 
-      // 2. Mint NFT setelah transfer berhasil
-      const nftContract = new Contract(NFT_CONTRACT_ADDRESS, nftAbi, relayerWallet);
-      const mintTx = await nftContract.mint(auth.from, 1);
-      console.log("🎨 Mint TX sent:", mintTx.hash);
-      await mintTx.wait();
-      console.log("✅ Mint TX confirmed");
-      
-      // Generate transaction links
-      const usdcTransactionLink = `${BASE_EXPLORER_URL}${usdcTx.hash}`;
-      const mintTransactionLink = `${BASE_EXPLORER_URL}${mintTx.hash}`;
+        // 1. Tangani Status Gagal atau 402
+        if (!response.ok) {
+            
+            // Gunakan data yang sudah dibaca (responseData) untuk semua kasus
+            if (response.status === 402) {
+                // Status 402 (Permintaan Pembayaran)
+                console.log("Menerima detail pembayaran 402:", responseData);
+                return { status: 'PAYMENT_REQUIRED', data: responseData };
+            }
+            
+            // Status Error Lain (400, 500)
+            console.error(`❌ Server Error ${response.status}:`, responseData);
+            
+            // Mengasumsikan responseData adalah string error atau objek error
+            const errorMessage = typeof responseData === 'object' && responseData.error 
+                                ? responseData.error 
+                                : String(responseData);
 
-      return {
-        statusCode: 200,
-        headers,
-        body: JSON.stringify({
-          message: 'Claim successful!',
-          usdcTransactionHash: usdcTx.hash,
-          mintTransactionHash: mintTx.hash,
-          usdcTransactionLink: usdcTransactionLink,
-          mintTransactionLink: mintTransactionLink,
-        }),
-      };
-    } catch (err) {
-      console.error('❌ Minting failed:', err);
-      
-      const errorMessage = err.reason || err.message || 'Internal server error.';
-      return {
-        statusCode: 500,
-        headers,
-        body: JSON.stringify({
-          error: errorMessage,
-        }),
-      };
+            throw new Error(`Transaksi gagal. Server merespon dengan ${response.status}: ${errorMessage.substring(0, 100)}...`);
+        }
+
+        // 2. Respons Sukses (200 OK)
+        // responseData sekarang berisi objek sukses dari server Netlify
+        const successData = responseData; 
+        
+        console.log("✅ Mint Sukses:", successData);
+        return { status: 'SUCCESS', data: successData };
+
+    } catch (error) {
+        console.error("Kesalahan Fetch, Parsing, atau Network:", error);
+        throw error;
     }
-  }
-
-  // Fallback
-  return { statusCode: 405, headers, body: JSON.stringify({ error: 'Method Not Allowed' }) };
-};
+}
