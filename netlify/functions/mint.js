@@ -42,7 +42,7 @@ exports.handler = async (event) => {
 
     const paymentMethod = {
       scheme: "exact",
-      network: "base",
+      network: "base", // blockchain yang dipakai (ubah ke 'ethereum' kalau mainnet)
       maxAmountRequired: "2000000", // 2.0 USDC (6 desimal)
       resource: resourceUrl,
       description: "the hood runs deep in 402. every face got a story. by https://x.com/sanukek https://x402hood.xyz",
@@ -75,17 +75,19 @@ exports.handler = async (event) => {
     return { statusCode: 405, headers, body: JSON.stringify({ error: 'Method Not Allowed' }) };
   }
 
-  // Parse JSON body
+  // === Parse JSON body (support string / object) ===
   let body;
   try {
-    body = JSON.parse(event.body);
-  } catch {
+    console.log("📦 Raw body:", event.body);
+    body = typeof event.body === "string" ? JSON.parse(event.body) : event.body;
+  } catch (err) {
+    console.error("❌ JSON parse error:", err);
     return { statusCode: 400, headers, body: 'Invalid JSON body' };
   }
 
-  console.log("📩 Received body:", body);
+  console.log("📩 Parsed body:", body);
 
-  // Validasi field dari x402scan
+  // === Validasi field dari x402scan ===
   if (!body.authorization || !body.resource || !body.resource.asset) {
     return {
       statusCode: 400,
