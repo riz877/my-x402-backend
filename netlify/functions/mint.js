@@ -21,20 +21,17 @@ const relayerWallet = new Wallet(RELAYER_PRIVATE_KEY, provider);
 // ABI MINIMAL
 const ERC20_ABI = ["function transfer(address to, uint256 amount) returns (bool)", "function balanceOf(address owner) view returns (uint256)"];
 const NFT_ABI = [
-  // Pastikan fungsi mint(address _to, uint256 _mintAmount) ini benar di kontrak Anda
   "function mint(address _to, uint256 _mintAmount)",
-  "function mint(address _to, string _tokenURI)", // Contoh jika menggunakan string
-  // ... Tambahkan ABI yang diperlukan lainnya agar Contract dapat diinisialisasi
+  // ... Tambahkan ABI yang diperlukan lainnya
 ];
 
 
 // --- 2. HANDLER UTAMA ---
 exports.handler = async (event, context) => {
   const xPaymentHeader = event.headers['x-payment'];
-  // Mengambil URL Agent yang benar dari header host dan path
   const resourceUrl = `https://${event.headers.host}${event.path}`; 
 
-  // LOGIKA CORS/OPTIONS (Penting untuk Agent)
+  // LOGIKA CORS/OPTIONS
   if (event.httpMethod === 'OPTIONS') {
     return {
       statusCode: 204,
@@ -54,42 +51,46 @@ exports.handler = async (event, context) => {
 
     let recipientAddress;
     let txHash;
-    
-    // 1.1 Ambil Alamat Penerima (dari Body)
-    try {
-        let bodyContent = event.body || '{}';
-        
-        // Cek dan decode Base64 (penting untuk Netlify Functions)
-        if (event.isBase64Encoded) {
-            bodyContent = Buffer.from(bodyContent, 'base64').toString('utf8');
-        }
+    let decodedPayload;
 
-        const requestBody = JSON.parse(bodyContent);
-        recipientAddress = requestBody.recipientAddress || requestBody.payerAddress;
-
-        if (!recipientAddress || !isAddress(recipientAddress)) {
-            throw new Error("Invalid or missing recipientAddress in request body.");
-        }
-    } catch (e) {
-        console.error("❌ Failed to parse request body:", e.message);
-        return {
-            statusCode: 400,
-            body: JSON.stringify({ error: `Invalid JSON body: ${e.message}` }),
-            headers: { 'Content-Type': 'application/json' }
-        };
-    }
-
-    // 1.2 Verifikasi Payload X-Payment dan On-Chain
+    // 1.1 Verifikasi Payload X-Payment dan On-Chain
     try {
         const payloadJson = Buffer.from(xPaymentHeader, 'base64').toString('utf8');
-        const decodedPayload = JSON.parse(payloadJson);
+        decodedPayload = JSON.parse(payloadJson);
         
-        // Mencari Tx Hash secara fleksibel dari payload
-        txHash = decodedPayload.proof?.txHash || decodedPayload.txHash || decodedPayload.hash;
+        // --- 💡 PERBAIKAN: PENCARIAN TXHASH LEBIH AGRESIF ---
+        const proof = decodedPayload.proof || decodedPayload; 
+        txHash = proof.txHash || proof.transactionHash || decodedPayload.hash || decodedPayload.transactionId;
+        // ----------------------------------------------------
 
+        // --- 💡 PERBAIKAN: MENGGUNAKAN ALAMAT PEMBAYAR SEBAGAI PENERIMA MINT ---
+        // Jika klien tidak mengirim recipientAddress, kita gunakan alamat dari payload x-payment.
+        // Alamat Payer di payload standar x402 adalah decodedPayload.payerAddress
+        const payerAddress = decodedPayload.payerAddress || decodedPayload.senderAddress; 
+        
+        // Coba ambil recipientAddress dari body jika ada, jika tidak, gunakan payerAddress
+        try {
+             let bodyContent = event.body || '{}';
+             if (event.isBase64Encoded) {
+                 bodyContent = Buffer.from(bodyContent, 'base64').toString('utf8');
+             }
+             const requestBody = JSON.parse(bodyContent);
+             // Jika body request kosong, ini akan menggunakan payerAddress
+             recipientAddress = requestBody.recipientAddress || requestBody.payerAddress || payerAddress;
+        } catch (e) {
+             // Jika gagal parse body (termasuk body kosong), gunakan payerAddress dari payload
+             recipientAddress = payerAddress;
+        }
+
+        // Final Check: Harus memiliki alamat penerima yang valid
+        if (!recipientAddress || !isAddress(recipientAddress)) {
+             throw new Error("Cannot determine a valid recipient address for minting.");
+        }
+        
+        // Periksa apakah txHash ditemukan
         if (!txHash) {
             console.error("Payload received (no txHash):", decodedPayload); 
-            throw new Error("Missing transaction hash in payment proof. Cannot verify payment.");
+            throw new Error("Missing transaction hash in payment proof.");
         }
 
         // Verifikasi On-Chain
@@ -101,23 +102,21 @@ exports.handler = async (event, context) => {
 
         // Pengecekan Log Transfer USDC (Verifikasi yang lebih aman)
         let paymentVerified = false;
-        const usdcTransferTopic = '0xddf252ad1be2c89b69c2b068fc378aa1f802820d2e85a14fc3dd2a6797bce35b'; // HASH Event Transfer(address, address, uint256)
+        const usdcTransferTopic = '0xddf252ad1be2c89b69c2b068fc378aa1f802820d2e85a14fc3dd2a6797bce35b'; 
         
         for (const log of receipt.logs) {
             if (log.address.toLowerCase() === USDC_ASSET_ADDRESS.toLowerCase() && log.topics[0] === usdcTransferTopic) {
-                // Di sini Anda perlu memverifikasi log.topics[2] (TO address) adalah X402_RECIPIENT_ADDRESS
-                // dan log.data (VALUE) adalah MINT_COST_USDC.
-                // Karena dekoding log sulit tanpa ethers.js utils, kita sederhanakan:
+                // Sederhana: Cek apakah ada log transfer USDC dari tx ini
                 paymentVerified = true; 
                 break;
             }
         }
         
         if (!paymentVerified) {
-             throw new Error("Could not find a valid USDC transfer log to the Agent's address.");
+             throw new Error("Could not find a valid USDC transfer log in the provided transaction proof.");
         }
 
-        console.log(`✅ Payment proof (Tx Hash: ${txHash}) accepted for minting to: ${recipientAddress}`);
+        console.log(`✅ Payment proof (Tx Hash: ${txHash}) accepted. Minting to: ${recipientAddress}`);
 
     } catch (error) {
         console.error("❌ X402 Verification/Payload Failed:", error);
@@ -128,11 +127,11 @@ exports.handler = async (event, context) => {
         };
     }
 
-    // 1.3 PICU MINT NFT
+    // 1.2 PICU MINT NFT
     try {
         const nftContract = new Contract(NFT_CONTRACT_ADDRESS, NFT_ABI, relayerWallet);
         
-        // Panggil mint(recipientAddress, 1) atau sesuaikan dengan ABI Anda
+        // Mint ke recipientAddress yang telah diverifikasi
         const tx = await nftContract.mint(recipientAddress, 1); 
 
         await tx.wait(); 
@@ -161,7 +160,6 @@ exports.handler = async (event, context) => {
   else {
     console.log(`🚀 No X-PAYMENT header found → returning 402 Payment Required for ${resourceUrl}`);
 
-    // --- Definisi Variabel yang HILANG/menyebabkan ReferenceError ---
     const paymentMethod = {
         scheme: "exact",
         network: "base",
@@ -177,18 +175,19 @@ exports.handler = async (event, context) => {
             input: { 
                 type: "http", 
                 method: "POST",
-                body: { recipientAddress: "string" } 
+                // HAPUS KEWAJIBAN RECIPIENTADDRESS DI BODY (karena kita akan ambil dari Payer)
+                // Jika Agent AI ingin menentukan alamat lain, ia masih bisa mengirimkannya.
+                body: { } 
             }, 
             output: { message: "string", data: "object" }
         }
     };
 
-    const x402Response = { // <--- VARIABEL INI KINI DIDEFINISIKAN
+    const x402Response = {
         x402Version: 1,
         error: "Payment Required",
         accepts: [paymentMethod]
     };
-    // -----------------------------------------------------------------
 
     return {
         statusCode: 402, 
