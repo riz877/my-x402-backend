@@ -1,3 +1,4 @@
+// File: netlify/functions/agent.js
 const { JsonRpcProvider, Wallet, Contract } = require('ethers');
 
 const {
@@ -6,13 +7,14 @@ const {
   NFT_CONTRACT_ADDRESS
 } = process.env;
 
+// ✅ Setup provider & relayer wallet (Ethers v6 style)
 const provider = new JsonRpcProvider(PROVIDER_URL);
 const relayerWallet = new Wallet(RELAYER_PRIVATE_KEY, provider);
 
+// ✅ Contract ABIs
 const usdcAbi = [
   "function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s)"
 ];
-
 const nftAbi = [
   "function mint(address _to, uint256 _mintAmount)"
 ];
@@ -25,8 +27,20 @@ module.exports = {
       'Access-Control-Allow-Methods': 'POST, OPTIONS',
     };
 
-    if (event.httpMethod === 'OPTIONS') return { statusCode: 200, headers };
+    // ✅ Preflight CORS
+    if (event.httpMethod === 'OPTIONS')
+      return { statusCode: 200, headers };
 
+    // ✅ Handle GET (optional test)
+    if (event.httpMethod === 'GET') {
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify({ message: 'Agent function is live ✅' }),
+      };
+    }
+
+    // ✅ Hanya izinkan POST
     if (event.httpMethod !== 'POST')
       return { statusCode: 405, headers, body: JSON.stringify({ error: 'Method Not Allowed' }) };
 
@@ -37,22 +51,45 @@ module.exports = {
       return { statusCode: 400, headers, body: 'Invalid JSON body' };
     }
 
+    console.log("📩 Received body:", body);
+
+    // ✅ Validasi input
+    if (!body.authorization || !body.resource || !body.resource.asset) {
+      return {
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({
+          error: "Missing required fields (authorization/resource.asset)",
+          received: body,
+        }),
+      };
+    }
+
     try {
       const auth = body.authorization;
       const resource = body.resource;
 
+      console.log("🔗 Using resource asset:", resource.asset);
+
+      // ✅ Transfer USDC
       const usdcContract = new Contract(resource.asset, usdcAbi, relayerWallet);
       const usdcTx = await usdcContract.transferWithAuthorization(
         auth.from, auth.to, auth.value,
         auth.validAfter, auth.validBefore, auth.nonce,
         auth.v, auth.r, auth.s
       );
+      console.log("💸 USDC TX sent:", usdcTx.hash);
       await usdcTx.wait();
+      console.log("✅ USDC TX confirmed");
 
+      // ✅ Mint NFT
       const nftContract = new Contract(NFT_CONTRACT_ADDRESS, nftAbi, relayerWallet);
       const mintTx = await nftContract.mint(auth.from, 1);
+      console.log("🎨 Mint TX sent:", mintTx.hash);
       await mintTx.wait();
+      console.log("✅ Mint TX confirmed");
 
+      // ✅ Success response
       return {
         statusCode: 200,
         headers,
@@ -63,11 +100,14 @@ module.exports = {
         }),
       };
     } catch (err) {
-      console.error('Agent failed:', err);
+      console.error('❌ Agent failed:', err);
       return {
         statusCode: 500,
         headers,
-        body: JSON.stringify({ error: err.message || 'Internal server error.' }),
+        body: JSON.stringify({
+          error: err.message || 'Internal server error.',
+          stack: err.stack,
+        }),
       };
     }
   },
