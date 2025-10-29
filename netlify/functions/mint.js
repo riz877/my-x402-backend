@@ -9,24 +9,21 @@ const {
   NFT_CONTRACT_ADDRESS
 } = process.env;
 
+// URL Block Explorer untuk jaringan Base
+const BASE_EXPLORER_URL = 'https://basescan.org/tx/';
+
 // Setup provider dan wallet relayer (pembayar gas)
 const provider = new JsonRpcProvider(PROVIDER_URL);
 const relayerWallet = new Wallet(RELAYER_PRIVATE_KEY, provider);
 
-// 🐛 PERBAIKAN: Menggunakan ABI yang HANYA berisi fungsi transferWithAuthorization
+// ABI kontrak yang dibutuhkan
 const usdcAbi = [
   "function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s)"
 ];
 
-// ABI NFT. Hanya perlu fungsi 'mint' untuk eksekusi, meskipun ABI yang diunggah lengkap.
 const nftAbi = [
   "function mint(address _to, uint256 _mintAmount)"
 ];
-// Catatan: Jika Anda ingin menggunakan ABI NFT yang lengkap dari file,
-// Anda harus menambahkan fungsi 'mint' yang sederhana (atau pakai yang lengkap).
-// Saya gunakan versi ringkas di sini, tapi versi lengkap di bawah juga aman.
-// Jika Anda tetap ingin menggunakan seluruh ABI NFT yang Anda unggah, tidak masalah
-// karena fungsi 'mint' sudah ada di dalamnya.
 
 // **************************** KODE DARI SINI SUDAH AMAN ****************************
 
@@ -121,6 +118,10 @@ module.exports.handler = async (event, context) => {
       console.log("🎨 Mint TX sent:", mintTx.hash);
       await mintTx.wait();
       console.log("✅ Mint TX confirmed");
+      
+      // *** MENAMBAHKAN TX LINK ***
+      const usdcTransactionLink = `${BASE_EXPLORER_URL}${usdcTx.hash}`;
+      const mintTransactionLink = `${BASE_EXPLORER_URL}${mintTx.hash}`;
 
       return {
         statusCode: 200,
@@ -129,11 +130,13 @@ module.exports.handler = async (event, context) => {
           message: 'Claim successful!',
           usdcTransactionHash: usdcTx.hash,
           mintTransactionHash: mintTx.hash,
+          usdcTransactionLink: usdcTransactionLink,
+          mintTransactionLink: mintTransactionLink, // Fitur baru
         }),
       };
     } catch (err) {
       console.error('❌ Minting failed:', err);
-      // Mengirimkan error yang lebih bersih jika dimungkinkan
+      
       const errorMessage = err.reason || err.message || 'Internal server error.';
       return {
         statusCode: 500,
