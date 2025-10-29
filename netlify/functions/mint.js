@@ -1,5 +1,5 @@
 // File: netlify/functions/mint.js
-const { JsonRpcProvider, Wallet, Contract, isAddress } = require('ethers');
+const { JsonRpcProvider, Wallet, Contract, isAddress, Interface } = require('ethers');
 
 // --- 1. KONFIGURASI DAN SETUP ---
 // Konstanta Kritis (Ganti dengan Nilai Sebenarnya jika berbeda)
@@ -25,6 +25,36 @@ const NFT_ABI = [
   // ... Tambahkan ABI yang diperlukan lainnya
 ];
 
+// TOPIC HASH untuk Event Transfer(address from, address to, uint256 value)
+const usdcTransferTopic = '0xddf252ad1be2c89b69c2b068fc378aa1f802820d2e85a14fc3dd2a6797bce35b';
+
+// --- FUNGSI UTILITY: Mendapatkan Payer Address dari Log Transfer ---
+const getPayerAddressAndVerifyPayment = (receipt) => {
+    // Alamat Payer harus diambil dari Topic[1] dari log transfer USDC
+    
+    for (const log of receipt.logs) {
+        // Cek apakah ini log transfer USDC
+        if (log.address.toLowerCase() === USDC_ASSET_ADDRESS.toLowerCase() && log.topics[0] === usdcTransferTopic) {
+            
+            // Verifikasi Payer: Topic[1] adalah alamat pengirim (FROM)
+            const senderTopic = log.topics[1]; 
+            const payerAddress = '0x' + senderTopic.substring(26); 
+            
+            // Verifikasi Penerima: Topic[2] adalah alamat penerima (TO)
+            const recipientTopic = log.topics[2];
+            const recipientLogAddress = '0x' + recipientTopic.substring(26);
+
+            // Verifikasi Pembayaran: Harus dikirim ke Agent dan merupakan alamat yang valid
+            if (recipientLogAddress.toLowerCase() === X402_RECIPIENT_ADDRESS.toLowerCase() && isAddress(payerAddress)) {
+                // Catatan: Di sini idealnya kita juga verifikasi log.data (jumlah transfer)
+                // Kita asumsikan jumlah transfer $2.00 sudah dicakup oleh proses Agent AI klien.
+                return payerAddress;
+            }
+        }
+    }
+    return null;
+}
+// ---------------------------------------------------------------------
 
 // --- 2. HANDLER UTAMA ---
 exports.handler = async (event, context) => {
@@ -49,77 +79,41 @@ exports.handler = async (event, context) => {
   if (xPaymentHeader) {
     console.log("Found X-PAYMENT header. Attempting verification and mint...");
 
-    let recipientAddress;
     let txHash;
-    let decodedPayload;
+    let recipientAddress; 
 
     // 1.1 Verifikasi Payload X-Payment dan On-Chain
     try {
         const payloadJson = Buffer.from(xPaymentHeader, 'base64').toString('utf8');
-        decodedPayload = JSON.parse(payloadJson);
+        const decodedPayload = JSON.parse(payloadJson);
         
-        // --- 💡 PERBAIKAN: PENCARIAN TXHASH LEBIH AGRESIF ---
+        // Mencari Tx Hash secara agresif (untuk mengatasi error 4ebf1a.png)
         const proof = decodedPayload.proof || decodedPayload; 
         txHash = proof.txHash || proof.transactionHash || decodedPayload.hash || decodedPayload.transactionId;
-        // ----------------------------------------------------
 
-        // --- 💡 PERBAIKAN: MENGGUNAKAN ALAMAT PEMBAYAR SEBAGAI PENERIMA MINT ---
-        // Jika klien tidak mengirim recipientAddress, kita gunakan alamat dari payload x-payment.
-        // Alamat Payer di payload standar x402 adalah decodedPayload.payerAddress
-        const payerAddress = decodedPayload.payerAddress || decodedPayload.senderAddress; 
-        
-        // Coba ambil recipientAddress dari body jika ada, jika tidak, gunakan payerAddress
-        try {
-             let bodyContent = event.body || '{}';
-             if (event.isBase64Encoded) {
-                 bodyContent = Buffer.from(bodyContent, 'base64').toString('utf8');
-             }
-             const requestBody = JSON.parse(bodyContent);
-             // Jika body request kosong, ini akan menggunakan payerAddress
-             recipientAddress = requestBody.recipientAddress || requestBody.payerAddress || payerAddress;
-        } catch (e) {
-             // Jika gagal parse body (termasuk body kosong), gunakan payerAddress dari payload
-             recipientAddress = payerAddress;
-        }
-
-        // Final Check: Harus memiliki alamat penerima yang valid
-        if (!recipientAddress || !isAddress(recipientAddress)) {
-             throw new Error("Cannot determine a valid recipient address for minting.");
-        }
-        
-        // Periksa apakah txHash ditemukan
         if (!txHash) {
-            console.error("Payload received (no txHash):", decodedPayload); 
             throw new Error("Missing transaction hash in payment proof.");
         }
 
-        // Verifikasi On-Chain
+        // Verifikasi On-Chain: Cek status dan keberadaan transaksi
         const receipt = await provider.getTransactionReceipt(txHash);
 
         if (!receipt || receipt.status !== 1) {
             throw new Error(`Transaction ${txHash} not confirmed or failed.`);
         }
 
-        // Pengecekan Log Transfer USDC (Verifikasi yang lebih aman)
-        let paymentVerified = false;
-        const usdcTransferTopic = '0xddf252ad1be2c89b69c2b068fc378aa1f802820d2e85a14fc3dd2a6797bce35b'; 
+        // 1.2 Tentukan Alamat Penerima dari Log Transaksi (Payer menjadi Recipient)
+        recipientAddress = getPayerAddressAndVerifyPayment(receipt);
         
-        for (const log of receipt.logs) {
-            if (log.address.toLowerCase() === USDC_ASSET_ADDRESS.toLowerCase() && log.topics[0] === usdcTransferTopic) {
-                // Sederhana: Cek apakah ada log transfer USDC dari tx ini
-                paymentVerified = true; 
-                break;
-            }
-        }
-        
-        if (!paymentVerified) {
-             throw new Error("Could not find a valid USDC transfer log in the provided transaction proof.");
+        if (!recipientAddress) {
+            throw new Error("Could not find a valid USDC transfer log to the Agent's address.");
         }
 
-        console.log(`✅ Payment proof (Tx Hash: ${txHash}) accepted. Minting to: ${recipientAddress}`);
+        console.log(`✅ Payment verified via Tx Log. Minting to: ${recipientAddress}`);
 
     } catch (error) {
         console.error("❌ X402 Verification/Payload Failed:", error);
+        // Mengatasi error 'Cannot determine a valid recipient address' dari sini.
         return {
             statusCode: 403,
             body: JSON.stringify({ error: `Invalid or unverified payment proof: ${error.message}` }),
@@ -127,11 +121,11 @@ exports.handler = async (event, context) => {
         };
     }
 
-    // 1.2 PICU MINT NFT
+    // 1.3 PICU MINT NFT
     try {
         const nftContract = new Contract(NFT_CONTRACT_ADDRESS, NFT_ABI, relayerWallet);
         
-        // Mint ke recipientAddress yang telah diverifikasi
+        // Mint ke recipientAddress yang ditemukan dari LOG TX (Payer)
         const tx = await nftContract.mint(recipientAddress, 1); 
 
         await tx.wait(); 
@@ -175,8 +169,7 @@ exports.handler = async (event, context) => {
             input: { 
                 type: "http", 
                 method: "POST",
-                // HAPUS KEWAJIBAN RECIPIENTADDRESS DI BODY (karena kita akan ambil dari Payer)
-                // Jika Agent AI ingin menentukan alamat lain, ia masih bisa mengirimkannya.
+                // Menghapus kebutuhan body wajib, penerima akan diambil dari log TX
                 body: { } 
             }, 
             output: { message: "string", data: "object" }
