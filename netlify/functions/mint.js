@@ -1,5 +1,5 @@
 // File: netlify/functions/mint.js
-const { JsonRpcProvider, Wallet, Contract, isAddress, splitSignature } = require('ethers');
+const { JsonRpcProvider, Wallet, Contract, isAddress, Signature } = require('ethers');
 
 // --- 1. CONFIGURATION AND SETUP ---
 const NFT_CONTRACT_ADDRESS = "0xaa1b03eea35b55d8c15187fe8f57255d4c179113";
@@ -143,8 +143,8 @@ exports.handler = async (event, context) => {
     try {
         const usdcContract = new Contract(USDC_ASSET_ADDRESS, USDC_ABI, relayerWallet);
         
-        // Split signature into v, r, s components
-        const sig = splitSignature(signature);
+        // Split signature into v, r, s components using Signature.from()
+        const sig = Signature.from(signature);
         
         console.log("Signature components:");
         console.log(`  v: ${sig.v}`);
