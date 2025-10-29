@@ -25,6 +25,65 @@ const NFT_ABI = [
 // TOPIC HASH for Transfer(address indexed from, address indexed to, uint256 value)
 const USDC_TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 
+// --- UTILITY: Extract transaction hash from payment proof ---
+const extractTxHash = (payload) => {
+  console.log("=== EXTRACTING TX HASH ===");
+  console.log("Full payload:", JSON.stringify(payload, null, 2));
+  
+  // Try direct properties first
+  if (payload.transactionHash) return payload.transactionHash;
+  if (payload.txHash) return payload.txHash;
+  if (payload.hash) return payload.hash;
+  if (payload.tx) return payload.tx;
+  if (payload.txId) return payload.txId;
+  if (payload.transactionId) return payload.transactionId;
+  
+  // Try proof object
+  if (payload.proof) {
+    const proof = payload.proof;
+    if (proof.transactionHash) return proof.transactionHash;
+    if (proof.txHash) return proof.txHash;
+    if (proof.hash) return proof.hash;
+    if (proof.tx) return proof.tx;
+    if (proof.txId) return proof.txId;
+    if (proof.transactionId) return proof.transactionId;
+  }
+  
+  // Try payment object
+  if (payload.payment) {
+    const payment = payload.payment;
+    if (payment.transactionHash) return payment.transactionHash;
+    if (payment.txHash) return payment.txHash;
+    if (payment.hash) return payment.hash;
+    if (payment.tx) return payment.tx;
+  }
+  
+  // Try transaction object
+  if (payload.transaction) {
+    const tx = payload.transaction;
+    if (tx.hash) return tx.hash;
+    if (tx.transactionHash) return tx.transactionHash;
+    if (tx.txHash) return tx.txHash;
+  }
+  
+  // Try data object
+  if (payload.data) {
+    const data = payload.data;
+    if (typeof data === 'string') return data; // Sometimes it's just a string
+    if (data.transactionHash) return data.transactionHash;
+    if (data.txHash) return data.txHash;
+    if (data.hash) return data.hash;
+  }
+  
+  // If payload is just a string (transaction hash directly)
+  if (typeof payload === 'string' && payload.startsWith('0x')) {
+    return payload;
+  }
+  
+  console.log("❌ Could not find transaction hash in any known location");
+  return null;
+};
+
 // --- UTILITY FUNCTION: Get Payer Address from Transfer Log ---
 const getPayerAddressAndVerifyPayment = (receipt) => {
     console.log("Checking transaction logs for USDC transfer...");
@@ -89,67 +148,81 @@ exports.handler = async (event, context) => {
   // 1. SUCCESS LOGIC: User paid USDC, now mint NFT to them (POST)
   // =======================================================
   if (xPaymentHeader && event.httpMethod === 'POST') {
-    console.log("Found X-PAYMENT header. User paid USDC. Verifying and minting NFT...");
+    console.log("=== PAYMENT VERIFICATION STARTED ===");
+    console.log("X-PAYMENT header found");
+    console.log("Raw header value:", xPaymentHeader);
 
     let txHash;
-    let userAddress; // The user who paid USDC will receive the NFT
+    let userAddress;
+    let decodedPayload;
 
     // 1.1 Verify X-Payment Payload and On-Chain
     try {
-        const payloadJson = Buffer.from(xPaymentHeader, 'base64').toString('utf8');
-        const decodedPayload = JSON.parse(payloadJson);
+        // Decode base64 payload
+        let payloadJson;
+        try {
+          payloadJson = Buffer.from(xPaymentHeader, 'base64').toString('utf8');
+          console.log("Decoded payload string:", payloadJson);
+        } catch (decodeError) {
+          console.error("Base64 decode error:", decodeError);
+          throw new Error("Failed to decode X-Payment header from base64");
+        }
         
-        console.log("DECODED PAYLOAD:", JSON.stringify(decodedPayload, null, 2)); 
+        // Parse JSON
+        try {
+          decodedPayload = JSON.parse(payloadJson);
+        } catch (parseError) {
+          console.error("JSON parse error:", parseError);
+          throw new Error("X-Payment header is not valid JSON");
+        }
         
-        // Extract transaction hash from various possible locations
-        const proof = decodedPayload.proof || decodedPayload; 
-        txHash = proof.txHash || 
-                 proof.transactionHash || 
-                 proof.hash || 
-                 proof.transactionId || 
-                 proof.txId ||
-                 decodedPayload.txHash ||
-                 decodedPayload.transactionHash ||
-                 decodedPayload.hash || 
-                 decodedPayload.transactionId ||
-                 decodedPayload.txId; 
+        console.log("=== PARSED PAYLOAD ===");
+        console.log(JSON.stringify(decodedPayload, null, 2));
+        
+        // Extract transaction hash using helper function
+        txHash = extractTxHash(decodedPayload);
 
         if (!txHash) {
-            console.error("Failed to find TxHash. Payload:", JSON.stringify(decodedPayload)); 
-            throw new Error("Missing transaction hash in payment proof.");
+            console.error("❌ All extraction methods failed");
+            console.error("Available keys in payload:", Object.keys(decodedPayload));
+            throw new Error("Missing transaction hash in payment proof. Please check the payment format.");
         }
 
-        console.log(`Verifying USDC payment transaction: ${txHash}`);
+        console.log(`✅ Extracted transaction hash: ${txHash}`);
+        console.log(`Verifying USDC payment transaction on Base network...`);
 
         // On-Chain Verification: Check transaction status
         const receipt = await provider.getTransactionReceipt(txHash);
 
         if (!receipt) {
-            throw new Error(`Transaction ${txHash} not found on Base network.`);
+            throw new Error(`Transaction ${txHash} not found on Base network. It may still be pending.`);
         }
 
         if (receipt.status !== 1) {
-            throw new Error(`Transaction ${txHash} failed on-chain.`);
+            throw new Error(`Transaction ${txHash} failed on-chain (status: ${receipt.status}).`);
         }
 
-        console.log(`✅ Transaction confirmed. Block: ${receipt.blockNumber}`);
+        console.log(`✅ Transaction confirmed in block: ${receipt.blockNumber}`);
 
         // 1.2 Extract the user's address from the USDC transfer logs
-        // This user paid USDC, so they should receive the NFT
         userAddress = getPayerAddressAndVerifyPayment(receipt);
         
         if (!userAddress) {
-            throw new Error("Could not verify USDC payment to the x402 recipient address.");
+            throw new Error("Could not verify USDC payment. Ensure you sent exactly 2 USDC to the correct address.");
         }
 
-        console.log(`✅ Payment verified! User ${userAddress} paid ${MINT_COST_USDC} USDC`);
+        console.log(`✅ Payment verified! User ${userAddress} paid USDC`);
 
     } catch (error) {
         console.error("❌ Payment Verification Failed:", error);
         return {
             statusCode: 403,
             body: JSON.stringify({ 
-                error: `Invalid or unverified payment: ${error.message}` 
+                error: `Invalid or unverified payment: ${error.message}`,
+                debug: {
+                  headerReceived: !!xPaymentHeader,
+                  payloadKeys: decodedPayload ? Object.keys(decodedPayload) : null
+                }
             }),
             headers: { 
                 'Content-Type': 'application/json',
@@ -165,7 +238,6 @@ exports.handler = async (event, context) => {
         console.log(`Minting NFT to user: ${userAddress} (relayer pays gas)...`);
         
         // Mint to the user who paid USDC
-        // Relayer wallet pays for gas, but NFT goes to userAddress
         const tx = await nftContract.mint(userAddress, 1); 
 
         console.log(`Mint transaction sent: ${tx.hash}`);
