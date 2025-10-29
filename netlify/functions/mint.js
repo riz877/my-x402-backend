@@ -1,5 +1,5 @@
 // File: netlify/functions/mint.js
-const { JsonRpcProvider, Wallet, Contract, isAddress } = require('ethers');
+const { JsonRpcProvider, Wallet, Contract, isAddress, splitSignature } = require('ethers');
 
 // --- 1. CONFIGURATION AND SETUP ---
 const NFT_CONTRACT_ADDRESS = "0xaa1b03eea35b55d8c15187fe8f57255d4c179113";
@@ -23,7 +23,7 @@ const NFT_ABI = [
 ];
 
 const USDC_ABI = [
-  "function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, bytes signature) external",
+  "function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s) external",
   "function balanceOf(address account) view returns (uint256)"
 ];
 
@@ -84,7 +84,7 @@ exports.handler = async (event, context) => {
     let usdcTxHash;
     let authData;
     let signature;
-    let decodedPayload; // Declare at function scope
+    let decodedPayload;
 
     try {
         // Decode X-Payment header
@@ -107,6 +107,7 @@ exports.handler = async (event, context) => {
         console.log(`Payment To: ${authData.to}`);
         console.log(`Amount: ${authData.value}`);
         console.log(`Nonce: ${authData.nonce}`);
+        console.log(`Signature: ${signature}`);
         
         // Verify authorization details
         if (authData.to.toLowerCase() !== X402_RECIPIENT_ADDRESS.toLowerCase()) {
@@ -142,6 +143,14 @@ exports.handler = async (event, context) => {
     try {
         const usdcContract = new Contract(USDC_ASSET_ADDRESS, USDC_ABI, relayerWallet);
         
+        // Split signature into v, r, s components
+        const sig = splitSignature(signature);
+        
+        console.log("Signature components:");
+        console.log(`  v: ${sig.v}`);
+        console.log(`  r: ${sig.r}`);
+        console.log(`  s: ${sig.s}`);
+        
         console.log("Executing transferWithAuthorization...");
         
         const tx = await usdcContract.transferWithAuthorization(
@@ -151,7 +160,9 @@ exports.handler = async (event, context) => {
             authData.validAfter,
             authData.validBefore,
             authData.nonce,
-            signature
+            sig.v,
+            sig.r,
+            sig.s
         );
         
         usdcTxHash = tx.hash;
@@ -176,6 +187,20 @@ exports.handler = async (event, context) => {
                 statusCode: 409,
                 body: JSON.stringify({ 
                     error: "This payment authorization has already been used"
+                }),
+                headers: { 
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*'
+                }
+            };
+        }
+        
+        // Check for invalid signature
+        if (error.message && error.message.includes("invalid signature")) {
+            return {
+                statusCode: 403,
+                body: JSON.stringify({ 
+                    error: "Invalid signature in payment authorization"
                 }),
                 headers: { 
                     'Content-Type': 'application/json',
