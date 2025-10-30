@@ -1,9 +1,7 @@
 [build]
-  # Command to deploy your frontend website (e.g., "npm run build")
-  # command = "npm run build"
-  
-  # Directory where your functions are located
-  functions = "netlify/functions"
-  
-  # Your frontend's build output directory (e.g., "build" or "dist")
-  # publish = "build"
+[[headers]]
+  for = "/.netlify/functions/*"
+  [headers.values]
+    Access-Control-Allow-Origin = "*"
+    Access-Control-Allow-Headers = "Content-Type, X-Payment"
+    Access-Control-Allow-Methods = "GET, POST, OPTIONS"
