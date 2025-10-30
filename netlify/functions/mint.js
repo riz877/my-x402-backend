@@ -1,5 +1,5 @@
 // File: netlify/functions/mint.js
-const { JsonRpcProvider, Contract } = require('ethers');
+const { JsonRpcProvider, Wallet, Contract } = require('ethers');
 
 const NFT_ADDRESS = "0xaa1b03eea35b55d8c15187fe8f57255d4c179113";
 const PAYMENT_ADDRESS = "0xD95A8764AA0dD4018971DE4Bc2adC09193b8A3c2";
@@ -7,67 +7,906 @@ const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const MINT_PRICE = "2000000"; // 2 USDC
 
 const provider = new JsonRpcProvider(process.env.PROVIDER_URL || "https://mainnet.base.org");
+const wallet = new Wallet(process.env.RELAYER_PRIVATE_KEY, provider);
 
-const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
-
-// Use a Map with timestamps for cache expiry (prevents memory leak)
-const verifiedMints = new Map();
-const CACHE_EXPIRY = 24 * 60 * 60 * 1000; // 24 hours
-
-const cleanupCache = () => {
-    const now = Date.now();
-    for (const [hash, timestamp] of verifiedMints.entries()) {
-        if (now - timestamp > CACHE_EXPIRY) {
-            verifiedMints.delete(hash);
-        }
-    }
-};
-
-const findUSDCPayment = async (minter, mintBlock) => {
-    console.log(`Searching for USDC payment from ${minter}`);
-    
-    // Search recent blocks (last 100 blocks before and including mint block)
-    const startBlock = Math.max(0, mintBlock - 100);
-    
-    for (let blockNum = mintBlock; blockNum >= startBlock; blockNum--) {
-        try {
-            const logs = await provider.getLogs({
-                address: USDC_ADDRESS,
-                topics: [
-                    TRANSFER_TOPIC,
-                    '0x000000000000000000000000' + minter.substring(2).toLowerCase(),
-                    '0x000000000000000000000000' + PAYMENT_ADDRESS.substring(2).toLowerCase()
-                ],
-                fromBlock: blockNum,
-                toBlock: blockNum
-            });
-            
-            for (const log of logs) {
-                const amount = BigInt(log.data);
-                
-                if (amount >= BigInt(MINT_PRICE)) {
-                    console.log(`✅ Found USDC payment in tx: ${log.transactionHash}`);
-                    
-                    // Verify transaction succeeded
-                    const receipt = await provider.getTransactionReceipt(log.transactionHash);
-                    if (receipt && receipt.status === 1) {
-                        return log.transactionHash;
-                    }
-                }
+const NFT_ABI = [
+    {
+        "inputs": [
+            {
+                "internalType": "string",
+                "name": "_name",
+                "type": "string"
+            },
+            {
+                "internalType": "string",
+                "name": "_symbol",
+                "type": "string"
+            },
+            {
+                "internalType": "string",
+                "name": "_initBaseURI",
+                "type": "string"
+            },
+            {
+                "internalType": "address",
+                "name": "_usdcTokenAddress",
+                "type": "address"
             }
-        } catch (error) {
-            console.error(`Error checking block ${blockNum}:`, error.message);
-            continue;
-        }
+        ],
+        "stateMutability": "nonpayable",
+        "type": "constructor"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "owner",
+                "type": "address"
+            },
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "approved",
+                "type": "address"
+            },
+            {
+                "indexed": true,
+                "internalType": "uint256",
+                "name": "tokenId",
+                "type": "uint256"
+            }
+        ],
+        "name": "Approval",
+        "type": "event"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "owner",
+                "type": "address"
+            },
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "operator",
+                "type": "address"
+            },
+            {
+                "indexed": false,
+                "internalType": "bool",
+                "name": "approved",
+                "type": "bool"
+            }
+        ],
+        "name": "ApprovalForAll",
+        "type": "event"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "previousOwner",
+                "type": "address"
+            },
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "newOwner",
+                "type": "address"
+            }
+        ],
+        "name": "OwnershipTransferred",
+        "type": "event"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "from",
+                "type": "address"
+            },
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "to",
+                "type": "address"
+            },
+            {
+                "indexed": true,
+                "internalType": "uint256",
+                "name": "tokenId",
+                "type": "uint256"
+            }
+        ],
+        "name": "Transfer",
+        "type": "event"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address[100]",
+                "name": "_users",
+                "type": "address[100]"
+            }
+        ],
+        "name": "add100PresaleUsers",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "_user",
+                "type": "address"
+            }
+        ],
+        "name": "addPresaleUser",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "to",
+                "type": "address"
+            },
+            {
+                "internalType": "uint256",
+                "name": "tokenId",
+                "type": "uint256"
+            }
+        ],
+        "name": "approve",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "owner",
+                "type": "address"
+            }
+        ],
+        "name": "balanceOf",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "baseExtension",
+        "outputs": [
+            {
+                "internalType": "string",
+                "name": "",
+                "type": "string"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "baseURI",
+        "outputs": [
+            {
+                "internalType": "string",
+                "name": "",
+                "type": "string"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "cost",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "uint256",
+                "name": "tokenId",
+                "type": "uint256"
+            }
+        ],
+        "name": "getApproved",
+        "outputs": [
+            {
+                "internalType": "address",
+                "name": "",
+                "type": "address"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "owner",
+                "type": "address"
+            },
+            {
+                "internalType": "address",
+                "name": "operator",
+                "type": "address"
+            }
+        ],
+        "name": "isApprovedForAll",
+        "outputs": [
+            {
+                "internalType": "bool",
+                "name": "",
+                "type": "bool"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "maxMintAmount",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "maxSupply",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "_to",
+                "type": "address"
+            },
+            {
+                "internalType": "uint256",
+                "name": "_mintAmount",
+                "type": "uint256"
+            }
+        ],
+        "name": "mint",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "name",
+        "outputs": [
+            {
+                "internalType": "string",
+                "name": "",
+                "type": "string"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "owner",
+        "outputs": [
+            {
+                "internalType": "address",
+                "name": "",
+                "type": "address"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "uint256",
+                "name": "tokenId",
+                "type": "uint256"
+            }
+        ],
+        "name": "ownerOf",
+        "outputs": [
+            {
+                "internalType": "address",
+                "name": "",
+                "type": "address"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "bool",
+                "name": "_state",
+                "type": "bool"
+            }
+        ],
+        "name": "pause",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "paused",
+        "outputs": [
+            {
+                "internalType": "bool",
+                "name": "",
+                "type": "bool"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "presaleCost",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "",
+                "type": "address"
+            }
+        ],
+        "name": "presaleWallets",
+        "outputs": [
+            {
+                "internalType": "bool",
+                "name": "",
+                "type": "bool"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "_user",
+                "type": "address"
+            }
+        ],
+        "name": "removePresaleUser",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "_user",
+                "type": "address"
+            }
+        ],
+        "name": "removeWhitelistUser",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "renounceOwnership",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "from",
+                "type": "address"
+            },
+            {
+                "internalType": "address",
+                "name": "to",
+                "type": "address"
+            },
+            {
+                "internalType": "uint256",
+                "name": "tokenId",
+                "type": "uint256"
+            }
+        ],
+        "name": "safeTransferFrom",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "from",
+                "type": "address"
+            },
+            {
+                "internalType": "address",
+                "name": "to",
+                "type": "address"
+            },
+            {
+                "internalType": "uint256",
+                "name": "tokenId",
+                "type": "uint256"
+            },
+            {
+                "internalType": "bytes",
+                "name": "_data",
+                "type": "bytes"
+            }
+        ],
+        "name": "safeTransferFrom",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "operator",
+                "type": "address"
+            },
+            {
+                "internalType": "bool",
+                "name": "approved",
+                "type": "bool"
+            }
+        ],
+        "name": "setApprovalForAll",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "string",
+                "name": "_newBaseExtension",
+                "type": "string"
+            }
+        ],
+        "name": "setBaseExtension",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "string",
+                "name": "_newBaseURI",
+                "type": "string"
+            }
+        ],
+        "name": "setBaseURI",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "uint256",
+                "name": "_newCost",
+                "type": "uint256"
+            }
+        ],
+        "name": "setCost",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "bytes4",
+                "name": "interfaceId",
+                "type": "bytes4"
+            }
+        ],
+        "name": "supportsInterface",
+        "outputs": [
+            {
+                "internalType": "bool",
+                "name": "",
+                "type": "bool"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "symbol",
+        "outputs": [
+            {
+                "internalType": "string",
+                "name": "",
+                "type": "string"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "uint256",
+                "name": "index",
+                "type": "uint256"
+            }
+        ],
+        "name": "tokenByIndex",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "owner",
+                "type": "address"
+            },
+            {
+                "internalType": "uint256",
+                "name": "index",
+                "type": "uint256"
+            }
+        ],
+        "name": "tokenOfOwnerByIndex",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "uint256",
+                "name": "tokenId",
+                "type": "uint256"
+            }
+        ],
+        "name": "tokenURI",
+        "outputs": [
+            {
+                "internalType": "string",
+                "name": "",
+                "type": "string"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "totalSupply",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "from",
+                "type": "address"
+            },
+            {
+                "internalType": "address",
+                "name": "to",
+                "type": "address"
+            },
+            {
+                "internalType": "uint256",
+                "name": "tokenId",
+                "type": "uint256"
+            }
+        ],
+        "name": "transferFrom",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "newOwner",
+                "type": "address"
+            }
+        ],
+        "name": "transferOwnership",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "usdcToken",
+        "outputs": [
+            {
+                "internalType": "contract IERC20",
+                "name": "",
+                "type": "address"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "_owner",
+                "type": "address"
+            }
+        ],
+        "name": "walletOfOwner",
+        "outputs": [
+            {
+                "internalType": "uint256[]",
+                "name": "",
+                "type": "uint256[]"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "_user",
+                "type": "address"
+            }
+        ],
+        "name": "whitelistUser",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "",
+                "type": "address"
+            }
+        ],
+        "name": "whitelisted",
+        "outputs": [
+            {
+                "internalType": "bool",
+                "name": "",
+                "type": "bool"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "withdraw",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
     }
-    
-    return null;
-};
+];
+
+const USDC_ABI = [
+  {
+    "constant": true,
+    "inputs": [],
+    "name": "name",
+    "outputs": [{ "name": "", "type": "string" }],
+    "payable": false,
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "constant": false,
+    "inputs": [
+      { "name": "_spender", "type": "address" },
+      { "name": "_value", "type": "uint256" }
+    ],
+    "name": "approve",
+    "outputs": [{ "name": "", "type": "bool" }],
+    "payable": false,
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "constant": true,
+    "inputs": [],
+    "name": "totalSupply",
+    "outputs": [{ "name": "", "type": "uint256" }],
+    "payable": false,
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "constant": false,
+    "inputs": [
+      { "name": "_from", "type": "address" },
+      { "name": "_to", "type": "address" },
+      { "name": "_value", "type": "uint256" }
+    ],
+    "name": "transferFrom",
+    "outputs": [{ "name": "", "type": "bool" }],
+    "payable": false,
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "constant": true,
+    "inputs": [],
+    "name": "decimals",
+    "outputs": [{ "name": "", "type": "uint8" }],
+    "payable": false,
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "constant": true,
+    "inputs": [{ "name": "_owner", "type": "address" }],
+    "name": "balanceOf",
+    "outputs": [{ "name": "balance", "type": "uint256" }],
+    "payable": false,
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "constant": true,
+    "inputs": [],
+    "name": "symbol",
+    "outputs": [{ "name": "", "type": "string" }],
+    "payable": false,
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "constant": false,
+    "inputs": [
+      { "name": "_to", "type": "address" },
+      { "name": "_value", "type": "uint256" }
+    ],
+    "name": "transfer",
+    "outputs": [{ "name": "", "type": "bool" }],
+    "payable": false,
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "constant": true,
+    "inputs": [
+      { "name": "_owner", "type": "address" },
+      { "name": "_spender", "type": "address" }
+    ],
+    "name": "allowance",
+    "outputs": [{ "name": "", "type": "uint256" }],
+    "payable": false,
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "payable": true,
+    "stateMutability": "payable",
+    "type": "fallback"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      { "indexed": true, "name": "owner", "type": "address" },
+      { "indexed": true, "name": "spender", "type": "address" },
+      { "indexed": false, "name": "value", "type": "uint256" }
+    ],
+    "name": "Approval",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      { "indexed": true, "name": "from", "type": "address" },
+      { "indexed": true, "name": "to", "type": "address" },
+      { "indexed": false, "name": "value", "type": "uint256" }
+    ],
+    "name": "Transfer",
+    "type": "event"
+  }
+];
+
+const nftContract = new Contract(NFT_ADDRESS, NFT_ABI, wallet);
+const usdcContract = new Contract(USDC_ADDRESS, USDC_ABI, wallet);
+
+const processedNonces = new Set();
 
 exports.handler = async (event) => {
-    // Cleanup old cache entries
-    cleanupCache();
-
     // CORS
     if (event.httpMethod === 'OPTIONS') {
         return {
@@ -75,7 +914,7 @@ exports.handler = async (event) => {
             headers: {
                 'Access-Control-Allow-Origin': '*',
                 'Access-Control-Allow-Headers': 'Content-Type, X-Payment',
-                'Access-Control-Allow-Methods': 'GET, POST, OPTIONS'
+                'Access-Control-Allow-Methods': 'POST, OPTIONS'
             }
         };
     }
@@ -89,57 +928,17 @@ exports.handler = async (event) => {
             statusCode: 402,
             body: JSON.stringify({
                 x402Version: 1,
-                error: "Payment Required",
-                message: "Pay 2 USDC and mint NFT yourself",
-                instructions: {
-                    step1: {
-                        description: "Send 2 USDC",
-                        to: PAYMENT_ADDRESS,
-                        token: USDC_ADDRESS,
-                        amount: "2000000", // 2 USDC with 6 decimals
-                        network: "Base"
-                    },
-                    step2: {
-                        description: "Mint NFT (you pay gas)",
-                        contract: NFT_ADDRESS,
-                        function: "mint(address _to, uint256 _mintAmount)",
-                        parameters: {
-                            _to: "YOUR_WALLET_ADDRESS",
-                            _mintAmount: "1"
-                        },
-                        network: "Base",
-                        estimatedGas: "~0.0001 ETH"
-                    },
-                    step3: {
-                        description: "Verify and get confirmation",
-                        action: "POST your mint transaction hash to this endpoint with X-Payment header"
-                    }
-                },
                 accepts: [{
                     scheme: "exact",
                     network: "base",
                     maxAmountRequired: MINT_PRICE,
                     resource: resourceUrl,
-                    description: "the hood runs deep in 402. Pay 2 USDC + mint yourself",
+                    description: "the hood runs deep in 402",
                     mimeType: "application/json",
                     image: "https://raw.githubusercontent.com/riz877/pic/refs/heads/main/G4SIxPcXEAAuo7O.jpg",
                     payTo: PAYMENT_ADDRESS,
-                    asset: USDC_ADDRESS,
-                    maxTimeoutSeconds: 600,
-                    outputSchema: {
-                        input: { type: "http", method: "POST" },
-                        output: { 
-                            success: "boolean",
-                            message: "string",
-                            minter: "string",
-                            verified: "boolean"
-                        }
-                    }
-                }],
-                nftContract: NFT_ADDRESS,
-                paymentAddress: PAYMENT_ADDRESS,
-                usdcAddress: USDC_ADDRESS,
-                network: "Base"
+                    asset: USDC_ADDRESS
+                }]
             }),
             headers: {
                 'Content-Type': 'application/json',
@@ -148,164 +947,110 @@ exports.handler = async (event) => {
         };
     }
 
-    // Verify mint transaction
+    // Process payment
     try {
         let payload;
         
-        // Handle different payload formats
+        // Parse X-Payment header
         try {
-            const payloadJson = Buffer.from(xPayment, 'base64').toString('utf8');
-            payload = JSON.parse(payloadJson);
+            const decoded = Buffer.from(xPayment, 'base64').toString('utf8');
+            payload = JSON.parse(decoded);
         } catch {
-            // If not base64, try parsing directly
-            try {
-                payload = JSON.parse(xPayment);
-            } catch {
-                // If not JSON, assume it's the transaction hash directly
-                payload = { transactionHash: xPayment };
-            }
+            payload = JSON.parse(xPayment);
         }
         
-        console.log("Received payload:", JSON.stringify(payload, null, 2));
-        
-        // Extract mint transaction hash
-        const mintTxHash = payload.transactionHash || 
-                          payload.txHash || 
-                          payload.hash ||
-                          payload.mintTx ||
-                          payload.proof?.hash ||
-                          payload.proof?.transactionHash;
-        
-        if (!mintTxHash || !mintTxHash.startsWith('0x')) {
+        console.log("Received x402 payment:", JSON.stringify(payload, null, 2));
+
+        // Extract authorization and signature
+        const auth = payload.payload?.authorization || payload.authorization;
+        const sig = payload.payload?.signature || payload.signature;
+
+        if (!auth || !sig) {
             return {
                 statusCode: 400,
-                body: JSON.stringify({ 
-                    error: "Invalid or missing mint transaction hash",
-                    hint: "Provide the transaction hash from your mint() call in format: {\"transactionHash\": \"0x...\"}"
-                }),
-                headers: { 
-                    'Content-Type': 'application/json',
-                    'Access-Control-Allow-Origin': '*'
-                }
+                body: JSON.stringify({ error: "Missing authorization or signature" }),
+                headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
             };
         }
 
-        // Check if already verified
-        if (verifiedMints.has(mintTxHash.toLowerCase())) {
+        const { from, to, value, validAfter, validBefore, nonce } = auth;
+
+        // Validate payment
+        if (to.toLowerCase() !== PAYMENT_ADDRESS.toLowerCase()) {
+            return {
+                statusCode: 400,
+                body: JSON.stringify({ error: "Invalid payment address" }),
+                headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+            };
+        }
+
+        if (BigInt(value) < BigInt(MINT_PRICE)) {
+            return {
+                statusCode: 400,
+                body: JSON.stringify({ 
+                    error: "Insufficient payment",
+                    required: MINT_PRICE,
+                    received: value
+                }),
+                headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+            };
+        }
+
+        // Check for replay
+        if (processedNonces.has(nonce)) {
             return {
                 statusCode: 409,
-                body: JSON.stringify({ 
-                    error: "This mint has already been verified",
-                    transactionHash: mintTxHash
-                }),
-                headers: { 
-                    'Content-Type': 'application/json',
-                    'Access-Control-Allow-Origin': '*'
-                }
+                body: JSON.stringify({ error: "Payment already processed" }),
+                headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
             };
         }
 
-        console.log(`Verifying mint transaction: ${mintTxHash}`);
+        console.log(`Processing payment from ${from}...`);
 
-        // Get mint transaction receipt
-        const mintReceipt = await provider.getTransactionReceipt(mintTxHash);
-
-        if (!mintReceipt) {
-            return {
-                statusCode: 404,
-                body: JSON.stringify({ 
-                    error: "Mint transaction not found on Base network",
-                    hint: "Make sure the transaction is confirmed and you're using the correct network"
-                }),
-                headers: { 
-                    'Content-Type': 'application/json',
-                    'Access-Control-Allow-Origin': '*'
-                }
-            };
-        }
-
-        if (mintReceipt.status !== 1) {
-            return {
-                statusCode: 400,
-                body: JSON.stringify({ 
-                    error: "Mint transaction failed on-chain",
-                    transactionHash: mintTxHash
-                }),
-                headers: { 
-                    'Content-Type': 'application/json',
-                    'Access-Control-Allow-Origin': '*'
-                }
-            };
-        }
-
-        // Verify it's an NFT mint from our contract
-        const nftMintLog = mintReceipt.logs.find(log => 
-            log.address.toLowerCase() === NFT_ADDRESS.toLowerCase() &&
-            log.topics[0] === TRANSFER_TOPIC &&
-            log.topics[1] === '0x0000000000000000000000000000000000000000000000000000000000000000' // from 0x0 (mint)
+        // Execute USDC transfer
+        const transferTx = await usdcContract.transferWithAuthorization(
+            from,
+            to,
+            value,
+            validAfter,
+            validBefore,
+            nonce,
+            sig
         );
 
-        if (!nftMintLog) {
-            return {
-                statusCode: 403,
-                body: JSON.stringify({ 
-                    error: "No NFT mint found in this transaction",
-                    hint: `Transaction must be a mint from contract ${NFT_ADDRESS}`
-                }),
-                headers: { 
-                    'Content-Type': 'application/json',
-                    'Access-Control-Allow-Origin': '*'
-                }
-            };
+        console.log(`Payment tx: ${transferTx.hash}`);
+        const transferReceipt = await transferTx.wait();
+
+        if (transferReceipt.status !== 1) {
+            throw new Error("Payment transaction failed");
         }
 
-        // Get minter address
-        const mintTx = await provider.getTransaction(mintTxHash);
-        const minter = mintTx.from;
-        const recipient = '0x' + nftMintLog.topics[2].substring(26);
+        console.log(`✅ Payment received, minting NFT...`);
 
-        console.log(`NFT minted to: ${recipient}`);
-        console.log(`Transaction from: ${minter}`);
+        // Mint NFT
+        const mintTx = await nftContract.mint(from, 1);
+        console.log(`Mint tx: ${mintTx.hash}`);
+        
+        const mintReceipt = await mintTx.wait();
 
-        // Verify USDC payment from minter
-        const paymentTxHash = await findUSDCPayment(minter, mintReceipt.blockNumber);
-
-        if (!paymentTxHash) {
-            return {
-                statusCode: 403,
-                body: JSON.stringify({ 
-                    error: "No USDC payment found",
-                    hint: `Please send exactly 2 USDC (${MINT_PRICE} with decimals) to ${PAYMENT_ADDRESS} before or during the mint transaction`,
-                    minter: minter,
-                    blockSearchRange: `Searched blocks ${Math.max(0, mintReceipt.blockNumber - 100)} to ${mintReceipt.blockNumber}`
-                }),
-                headers: { 
-                    'Content-Type': 'application/json',
-                    'Access-Control-Allow-Origin': '*'
-                }
-            };
+        if (mintReceipt.status !== 1) {
+            throw new Error("Mint transaction failed");
         }
 
-        console.log(`✅ Verification complete!`);
+        console.log(`✅ NFT minted successfully`);
 
-        // Mark as verified with timestamp
-        verifiedMints.set(mintTxHash.toLowerCase(), Date.now());
+        // Mark as processed
+        processedNonces.add(nonce);
 
         return {
             statusCode: 200,
             body: JSON.stringify({
                 success: true,
-                message: "✅ Verified! USDC payment received and NFT minted",
-                verified: true,
-                data: {
-                    minter: minter,
-                    nftRecipient: recipient,
-                    paymentTx: paymentTxHash,
-                    mintTx: mintTxHash,
-                    blockNumber: mintReceipt.blockNumber,
-                    paymentTxUrl: `https://basescan.org/tx/${paymentTxHash}`,
-                    mintTxUrl: `https://basescan.org/tx/${mintTxHash}`
-                }
+                message: "Payment received and NFT minted",
+                recipient: from,
+                paymentTx: transferTx.hash,
+                mintTx: mintTx.hash,
+                explorerUrl: `https://basescan.org/tx/${mintTx.hash}`
             }),
             headers: { 
                 'Content-Type': 'application/json',
@@ -314,13 +1059,22 @@ exports.handler = async (event) => {
         };
 
     } catch (error) {
-        console.error("Verification error:", error);
+        console.error("Error:", error);
+        
+        let errorMessage = error.message;
+        
+        // Handle common errors
+        if (error.message.includes('used')) {
+            errorMessage = "This payment has already been used";
+        } else if (error.message.includes('not yet valid')) {
+            errorMessage = "Payment authorization not yet valid";
+        } else if (error.message.includes('expired')) {
+            errorMessage = "Payment authorization expired";
+        }
+
         return {
             statusCode: 500,
-            body: JSON.stringify({ 
-                error: "Verification failed: " + error.message,
-                details: error.stack
-            }),
+            body: JSON.stringify({ error: errorMessage }),
             headers: { 
                 'Content-Type': 'application/json',
                 'Access-Control-Allow-Origin': '*'
