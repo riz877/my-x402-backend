@@ -1,5 +1,5 @@
 // File: netlify/functions/mint.js
-const { JsonRpcProvider } = require('ethers');
+const { JsonRpcProvider, Contract } = require('ethers');
 
 const NFT_ADDRESS = "0xaa1b03eea35b55d8c15187fe8f57255d4c179113";
 const PAYMENT_ADDRESS = "0xD95A8764AA0dD4018971DE4Bc2adC09193b8A3c2";
@@ -10,39 +10,48 @@ const provider = new JsonRpcProvider(process.env.PROVIDER_URL || "https://mainne
 
 const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 
-const verifiedMints = new Set();
+// Use a Map with timestamps for cache expiry (prevents memory leak)
+const verifiedMints = new Map();
+const CACHE_EXPIRY = 24 * 60 * 60 * 1000; // 24 hours
+
+const cleanupCache = () => {
+    const now = Date.now();
+    for (const [hash, timestamp] of verifiedMints.entries()) {
+        if (now - timestamp > CACHE_EXPIRY) {
+            verifiedMints.delete(hash);
+        }
+    }
+};
 
 const findUSDCPayment = async (minter, mintBlock) => {
     console.log(`Searching for USDC payment from ${minter}`);
     
-    // Search recent blocks (last 50 blocks before mint)
-    const startBlock = Math.max(0, mintBlock - 50);
+    // Search recent blocks (last 100 blocks before and including mint block)
+    const startBlock = Math.max(0, mintBlock - 100);
     
-    for (let blockNum = startBlock; blockNum <= mintBlock; blockNum++) {
+    for (let blockNum = mintBlock; blockNum >= startBlock; blockNum--) {
         try {
-            const block = await provider.getBlock(blockNum, true);
+            const logs = await provider.getLogs({
+                address: USDC_ADDRESS,
+                topics: [
+                    TRANSFER_TOPIC,
+                    '0x000000000000000000000000' + minter.substring(2).toLowerCase(),
+                    '0x000000000000000000000000' + PAYMENT_ADDRESS.substring(2).toLowerCase()
+                ],
+                fromBlock: blockNum,
+                toBlock: blockNum
+            });
             
-            for (const txHash of block.transactions) {
-                const receipt = await provider.getTransactionReceipt(txHash);
+            for (const log of logs) {
+                const amount = BigInt(log.data);
                 
-                if (!receipt || receipt.status !== 1) continue;
-                
-                // Check for USDC transfer
-                for (const log of receipt.logs) {
-                    if (log.address.toLowerCase() === USDC_ADDRESS.toLowerCase() &&
-                        log.topics[0] === TRANSFER_TOPIC) {
-                        
-                        const from = '0x' + log.topics[1].substring(26);
-                        const to = '0x' + log.topics[2].substring(26);
-                        const amount = BigInt(log.data);
-                        
-                        if (from.toLowerCase() === minter.toLowerCase() &&
-                            to.toLowerCase() === PAYMENT_ADDRESS.toLowerCase() &&
-                            amount >= BigInt(MINT_PRICE)) {
-                            
-                            console.log(`✅ Found USDC payment: ${txHash}`);
-                            return txHash;
-                        }
+                if (amount >= BigInt(MINT_PRICE)) {
+                    console.log(`✅ Found USDC payment in tx: ${log.transactionHash}`);
+                    
+                    // Verify transaction succeeded
+                    const receipt = await provider.getTransactionReceipt(log.transactionHash);
+                    if (receipt && receipt.status === 1) {
+                        return log.transactionHash;
                     }
                 }
             }
@@ -56,6 +65,9 @@ const findUSDCPayment = async (minter, mintBlock) => {
 };
 
 exports.handler = async (event) => {
+    // Cleanup old cache entries
+    cleanupCache();
+
     // CORS
     if (event.httpMethod === 'OPTIONS') {
         return {
@@ -100,7 +112,7 @@ exports.handler = async (event) => {
                     },
                     step3: {
                         description: "Verify and get confirmation",
-                        action: "POST your mint transaction hash to this endpoint"
+                        action: "POST your mint transaction hash to this endpoint with X-Payment header"
                     }
                 },
                 accepts: [{
@@ -138,8 +150,21 @@ exports.handler = async (event) => {
 
     // Verify mint transaction
     try {
-        const payloadJson = Buffer.from(xPayment, 'base64').toString('utf8');
-        const payload = JSON.parse(payloadJson);
+        let payload;
+        
+        // Handle different payload formats
+        try {
+            const payloadJson = Buffer.from(xPayment, 'base64').toString('utf8');
+            payload = JSON.parse(payloadJson);
+        } catch {
+            // If not base64, try parsing directly
+            try {
+                payload = JSON.parse(xPayment);
+            } catch {
+                // If not JSON, assume it's the transaction hash directly
+                payload = { transactionHash: xPayment };
+            }
+        }
         
         console.log("Received payload:", JSON.stringify(payload, null, 2));
         
@@ -148,14 +173,15 @@ exports.handler = async (event) => {
                           payload.txHash || 
                           payload.hash ||
                           payload.mintTx ||
-                          payload.proof?.hash;
+                          payload.proof?.hash ||
+                          payload.proof?.transactionHash;
         
-        if (!mintTxHash) {
+        if (!mintTxHash || !mintTxHash.startsWith('0x')) {
             return {
                 statusCode: 400,
                 body: JSON.stringify({ 
-                    error: "Missing mint transaction hash",
-                    hint: "Provide the transaction hash from your mint() call"
+                    error: "Invalid or missing mint transaction hash",
+                    hint: "Provide the transaction hash from your mint() call in format: {\"transactionHash\": \"0x...\"}"
                 }),
                 headers: { 
                     'Content-Type': 'application/json',
@@ -169,7 +195,8 @@ exports.handler = async (event) => {
             return {
                 statusCode: 409,
                 body: JSON.stringify({ 
-                    error: "This mint has already been verified"
+                    error: "This mint has already been verified",
+                    transactionHash: mintTxHash
                 }),
                 headers: { 
                     'Content-Type': 'application/json',
@@ -187,7 +214,8 @@ exports.handler = async (event) => {
             return {
                 statusCode: 404,
                 body: JSON.stringify({ 
-                    error: "Mint transaction not found on Base network"
+                    error: "Mint transaction not found on Base network",
+                    hint: "Make sure the transaction is confirmed and you're using the correct network"
                 }),
                 headers: { 
                     'Content-Type': 'application/json',
@@ -200,7 +228,8 @@ exports.handler = async (event) => {
             return {
                 statusCode: 400,
                 body: JSON.stringify({ 
-                    error: "Mint transaction failed on-chain"
+                    error: "Mint transaction failed on-chain",
+                    transactionHash: mintTxHash
                 }),
                 headers: { 
                     'Content-Type': 'application/json',
@@ -220,7 +249,8 @@ exports.handler = async (event) => {
             return {
                 statusCode: 403,
                 body: JSON.stringify({ 
-                    error: "No NFT mint found in this transaction"
+                    error: "No NFT mint found in this transaction",
+                    hint: `Transaction must be a mint from contract ${NFT_ADDRESS}`
                 }),
                 headers: { 
                     'Content-Type': 'application/json',
@@ -232,8 +262,9 @@ exports.handler = async (event) => {
         // Get minter address
         const mintTx = await provider.getTransaction(mintTxHash);
         const minter = mintTx.from;
+        const recipient = '0x' + nftMintLog.topics[2].substring(26);
 
-        console.log(`NFT minted to: ${'0x' + nftMintLog.topics[2].substring(26)}`);
+        console.log(`NFT minted to: ${recipient}`);
         console.log(`Transaction from: ${minter}`);
 
         // Verify USDC payment from minter
@@ -244,8 +275,9 @@ exports.handler = async (event) => {
                 statusCode: 403,
                 body: JSON.stringify({ 
                     error: "No USDC payment found",
-                    hint: `Please send 2 USDC to ${PAYMENT_ADDRESS} before minting`,
-                    minter: minter
+                    hint: `Please send exactly 2 USDC (${MINT_PRICE} with decimals) to ${PAYMENT_ADDRESS} before or during the mint transaction`,
+                    minter: minter,
+                    blockSearchRange: `Searched blocks ${Math.max(0, mintReceipt.blockNumber - 100)} to ${mintReceipt.blockNumber}`
                 }),
                 headers: { 
                     'Content-Type': 'application/json',
@@ -256,21 +288,23 @@ exports.handler = async (event) => {
 
         console.log(`✅ Verification complete!`);
 
-        // Mark as verified
-        verifiedMints.add(mintTxHash.toLowerCase());
+        // Mark as verified with timestamp
+        verifiedMints.set(mintTxHash.toLowerCase(), Date.now());
 
         return {
             statusCode: 200,
             body: JSON.stringify({
                 success: true,
-                message: "Verified! USDC payment received and NFT minted",
+                message: "✅ Verified! USDC payment received and NFT minted",
                 verified: true,
                 data: {
                     minter: minter,
-                    nftRecipient: '0x' + nftMintLog.topics[2].substring(26),
+                    nftRecipient: recipient,
                     paymentTx: paymentTxHash,
                     mintTx: mintTxHash,
-                    blockNumber: mintReceipt.blockNumber
+                    blockNumber: mintReceipt.blockNumber,
+                    paymentTxUrl: `https://basescan.org/tx/${paymentTxHash}`,
+                    mintTxUrl: `https://basescan.org/tx/${mintTxHash}`
                 }
             }),
             headers: { 
@@ -284,7 +318,8 @@ exports.handler = async (event) => {
         return {
             statusCode: 500,
             body: JSON.stringify({ 
-                error: "Verification failed: " + error.message 
+                error: "Verification failed: " + error.message,
+                details: error.stack
             }),
             headers: { 
                 'Content-Type': 'application/json',
