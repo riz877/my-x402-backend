@@ -1,11 +1,12 @@
 const { JsonRpcProvider, Wallet, Contract, Signature } = require('ethers');
 
-// --- KONFIGURASI ---
-const NFT_CONTRACT_ADDRESS = "0xaa1b03eea35b55d8c15187fe8f57255d4c179113"; // Kontrak NFT Anda
-const PAYMENT_RECIPIENT = "0xD95A8764AA0dD4018971DE4Bc2adC09193b8A3c2"; // Dompet Anda
-const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"; // USDC di Base
-const MINT_PRICE = "10000"; // 0.10 USDC (karena 6 desimal)
-const WIN_CHANCE_PERCENT = 2; // 50% Peluang menang
+// --- CONFIGURATION (DIUBAH) ---
+const NFT_CONTRACT_ADDRESS = "0xaa1b03eea35b55d8c15187fe8f57255d4c179113";
+const PAYMENT_RECIPIENT = "0xD95A8764AA0dD4018971DE4Bc2adC09193b8A3c2";
+const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+const MINT_PRICE = "10000000"; // 10 USDC (10 * 1,000,000)
+const MINT_AMOUNT = 5; // 5 NFT
+// --- AKHIR PERUBAHAN ---
 
 const { PROVIDER_URL, RELAYER_PRIVATE_KEY } = process.env;
 const provider = new JsonRpcProvider(PROVIDER_URL || "https://mainnet.base.org");
@@ -19,48 +20,61 @@ if (RELAYER_PRIVATE_KEY) {
 // ABIs
 const USDC_ABI = [
     'function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s) external',
-    'function balanceOf(address account) view returns (uint256)'
+    'function balanceOf(address account) view returns (uint256)',
+    'event Transfer(address indexed from, address indexed to, uint256 value)'
 ];
+
 const NFT_ABI = [
     'function mint(address to, uint256 amount) public',
     'function totalSupply() public view returns (uint256)',
     'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)'
 ];
+
 const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 
 const processedAuthorizations = new Set();
-const processedMints = new Set();
 
-// Fungsi executeUSDCTransfer
+// Fungsi executeUSDCTransfer (Tidak ada perubahan, tapi akan menggunakan MINT_PRICE baru)
 async function executeUSDCTransfer(authorization, signature) {
     try {
         const { from, to, value, validAfter, validBefore, nonce } = authorization;
         console.log('Executing USDC transfer:', { from, to, value, nonce });
+
         if (!backendWallet) throw new Error('Backend wallet not configured');
+
         const usdcContract = new Contract(USDC_ADDRESS, USDC_ABI, backendWallet);
+
         const authKey = `${from}-${nonce}`.toLowerCase();
         if (processedAuthorizations.has(authKey)) {
             throw new Error('Authorization already processed');
         }
+
+        // Verifikasi jumlah (sekarang harus $10)
         if (BigInt(value) < BigInt(MINT_PRICE)) {
             throw new Error(`Insufficient amount: ${value}, required: ${MINT_PRICE}`);
         }
         if (to.toLowerCase() !== PAYMENT_RECIPIENT.toLowerCase()) {
             throw new Error('Invalid payment recipient');
         }
+
         let sig;
         try {
             sig = Signature.from(signature);
         } catch (e) {
+            console.error("Invalid signature format:", signature);
             throw new Error('Invalid signature format');
         }
         const { v, r, s } = sig;
+
         console.log('Calling transferWithAuthorization...');
         const tx = await usdcContract.transferWithAuthorization(
             from, to, value, validAfter, validBefore, nonce, v, r, s
         );
+
+        console.log('Transfer tx sent:', tx.hash);
         const receipt = await tx.wait();
         console.log('Transfer confirmed in block:', receipt.blockNumber);
+
         processedAuthorizations.add(authKey);
         return { success: true, txHash: receipt.hash, from, amount: value };
     } catch (error) {
@@ -69,48 +83,74 @@ async function executeUSDCTransfer(authorization, signature) {
     }
 }
 
-// Fungsi mintNFT
+
+// =================================================================
+// FUNGSI MINTNFT (DIUBAH)
+// =================================================================
 async function mintNFT(recipientAddress) {
     try {
-        console.log('Minting NFT to:', recipientAddress);
-        if (!backendWallet) throw new Error('Backend wallet not configured');
-        const mintKey = recipientAddress.toLowerCase();
-        if (processedMints.has(mintKey)) {
-            throw new Error('Already minted for this address');
+        console.log(`Minting ${MINT_AMOUNT} NFTs to:`, recipientAddress); // Log diubah
+
+        if (!backendWallet) {
+            throw new Error('Backend wallet not configured');
         }
+
+        // Cek unlimited mint (sudah dihapus dari kode Anda sebelumnya)
+        
         const nftContract = new Contract(NFT_CONTRACT_ADDRESS, NFT_ABI, backendWallet);
         const balance = await provider.getBalance(backendWallet.address);
+        console.log('Backend wallet balance:', (Number(balance) / 1e18).toFixed(4), 'ETH');
+
         if (balance < BigInt(1e15)) { // 0.001 ETH
             throw new Error('Insufficient gas in backend wallet');
         }
-        console.log('Calling mint function...');
-        const tx = await nftContract.mint(recipientAddress, 1, { gasLimit: 200000 });
+
+        // Mint NFT (Jumlah diubah ke MINT_AMOUNT)
+        console.log('Calling mint function for 5 NFTs...');
+        const tx = await nftContract.mint(recipientAddress, MINT_AMOUNT, { // <-- DIUBAH
+            gasLimit: 800000 // Gas limit dinaikkan untuk 5 mint
+        });
+
+        console.log('Mint tx sent:', tx.hash);
         const receipt = await tx.wait();
         console.log('Mint confirmed in block:', receipt.blockNumber);
-        let tokenId;
+
+        // Extract token IDs (jamak)
+        let tokenIds = []; // <-- DIUBAH ke array
         for (const log of receipt.logs) {
             if (log.address.toLowerCase() === NFT_CONTRACT_ADDRESS.toLowerCase() &&
-                log.topics[0] === TRANSFER_TOPIC &&
-                '0x' + log.topics[1].substring(26) === '0x0000000000000000000000000000000000000000') {
-                tokenId = BigInt(log.topics[3]).toString();
-                break;
+                log.topics[0] === TRANSFER_TOPIC) {
+                
+                const from = '0x' + log.topics[1].substring(26);
+                if (from === '0x0000000000000000000000000000000000000000') {
+                    // Tambahkan ID ke array, jangan break
+                    tokenIds.push(BigInt(log.topics[3]).toString()); // <-- DIUBAH
+                }
             }
         }
-        if (!tokenId) {
-            tokenId = (await nftContract.totalSupply()).toString();
+
+        if (tokenIds.length === 0) { // <-- DIUBAH
+            // Fallback ini tidak bisa diandalkan, jadi lempar error
+            throw new Error('Could not parse token IDs from mint transaction');
         }
-        processedMints.add(mintKey);
-        setTimeout(() => processedMints.delete(mintKey), 3600000);
-        return { success: true, tokenId, txHash: receipt.hash, blockNumber: receipt.blockNumber };
+
+        return {
+            success: true,
+            tokenIds, // <-- DIUBAH
+            txHash: receipt.hash,
+            blockNumber: receipt.blockNumber
+        };
+
     } catch (error) {
         console.error('Mint error:', error);
         throw error;
     }
 }
+// =================================================================
+// AKHIR FUNGSI MINTNFT
+// =================================================================
 
-// =================================================================
-// HANDLER (FUNGSI UTAMA)
-// =================================================================
+
 exports.handler = async (event) => {
     // CORS preflight
     if (event.httpMethod === 'OPTIONS') {
@@ -126,27 +166,26 @@ exports.handler = async (event) => {
 
     const xPaymentHeader = event.headers['x-payment'] || event.headers['X-Payment'];
 
-    // --- GET REQUEST: (outputSchema diperbaiki) ---
+    // --- GET REQUEST (DIUBAH) ---
     if (event.httpMethod === 'GET' || !xPaymentHeader) {
         return {
             statusCode: 402,
             body: JSON.stringify({
                 x402Version: 1,
                 error: "Payment Required",
-                message: "Pay 0.10 USDC to try your luck",
+                message: "Send x402 payment authorization to mint 5 NFTs", // <-- Diubah
                 accepts: [{
                     scheme: "exact",
                     network: "base",
-                    maxAmountRequired: MINT_PRICE,
+                    maxAmountRequired: MINT_PRICE, // Otomatis $10
                     resource: `https://${event.headers.host}${event.path}`,
-                    description: `Try to mint if you think you're lucky enough. ${WIN_CHANCE_PERCENT}% chance!`,
+                    description: "the hood runs deep in 402. Pay 10 USDC to mint 5 NFTs", // <-- Diubah
                     mimeType: "application/json",
                     image: "https://raw.githubusercontent.com/riz877/pic/refs/heads/main/G4SIxPcXEAAuo7O.jpg",
                     payTo: PAYMENT_RECIPIENT,
                     asset: USDC_ADDRESS,
                     maxTimeoutSeconds: 3600,
                     outputSchema: {
-                        // --- PERBAIKAN DIMULAI DISINI ---
                         input: { 
                             type: "http", 
                             method: "POST",
@@ -173,15 +212,15 @@ exports.handler = async (event) => {
                                 }
                             }
                         },
-                        // --- PERBAIKAN SELESAI ---
                         output: { 
                             success: "boolean",
                             message: "string",
                             data: {
                                 type: "object",
                                 properties: {
-                                    lucky: { type: "boolean" },
-                                    tokenId: { type: "string" },
+                                    // --- DIUBAH ---
+                                    tokenIds: { type: "array", items: { type: "string" } }, 
+                                    // ---
                                     nftContract: { type: "string" },
                                     recipient: { type: "string" },
                                     paymentTx: { type: "string" },
@@ -195,8 +234,8 @@ exports.handler = async (event) => {
                         version: "2",
                         contractAddress: NFT_CONTRACT_ADDRESS,
                         paymentAddress: PAYMENT_RECIPIENT,
-                        autoMint: false,
-                        description: "Lucky draw minting upon payment"
+                        autoMint: true,
+                        description: "Automatic NFT minting upon payment verification"
                     }
                 }]
             }),
@@ -208,19 +247,18 @@ exports.handler = async (event) => {
         };
     }
 
-    // --- POST REQUEST: (Logika minting) ---
+    // --- POST REQUEST (DIUBAH) ---
     try {
         const payloadJson = Buffer.from(xPaymentHeader, 'base64').toString('utf8');
         const payload = JSON.parse(payloadJson);
         
         console.log("📨 Received payload:", JSON.stringify(payload, null, 2));
 
-        if (!payload.x402Version || !payload.payload || !payload.payload.authorization || !payload.payload.signature) {
-            return {
-                statusCode: 400,
-                body: JSON.stringify({ success: false, error: "Invalid x402 payload" }),
-                headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
-            };
+        if (!payload.x402Version || payload.x402Version !== 1) {
+             return { /* ... error handling ... */ };
+        }
+        if (!payload.payload || !payload.payload.authorization || !payload.payload.signature) {
+             return { /* ... error handling ... */ };
         }
 
         const { authorization, signature } = payload.payload;
@@ -229,71 +267,43 @@ exports.handler = async (event) => {
         console.log('👤 User address:', userAddress);
         console.log('💰 Payment amount:', authorization.value, 'USDC (expected:', MINT_PRICE, ')');
 
-        // Step 1: Eksekusi transfer USDC
+        // Step 1: Execute USDC transfer
         console.log('Step 1: Executing USDC transfer...');
         const transferResult = await executeUSDCTransfer(authorization, signature);
         console.log('✅ Transfer successful:', transferResult.txHash);
 
-        // Step 2: Tentukan keberuntungan
-        console.log('Step 2: Rolling the dice...');
-        const winThreshold = WIN_CHANCE_PERCENT / 100; // 0.5
-        const roll = Math.random(); // Angka antara 0.0 dan 1.0
-        const isLucky = roll < winThreshold;
+        // Step 2: Mint 5 NFTs
+        console.log('Step 2: Minting 5 NFTs...');
+        const mintResult = await mintNFT(userAddress);
+        console.log('✅ Mint successful: Token IDs:', mintResult.tokenIds.join(', ')); // <-- Diubah
 
-        console.log(`Roll: ${roll.toFixed(4)}, Threshold: ${winThreshold}, Lucky: ${isLucky}`);
-
-        // Step 3: Minting HANYA jika beruntung
-        if (isLucky) {
-            console.log('✅ Lucky! Minting NFT...');
-            const mintResult = await mintNFT(userAddress);
-            console.log('✅ Mint successful: Token #', mintResult.tokenId);
-
-            // Return sukses (Menang)
-            return {
-                statusCode: 200,
-                body: JSON.stringify({
-                    success: true,
-                    message: "You're lucky! Payment received and NFT minted! 🎉",
-                    data: {
-                        lucky: true,
-                        tokenId: mintResult.tokenId,
-                        nftContract: NFT_CONTRACT_ADDRESS,
-                        recipient: userAddress,
-                        paymentTx: transferResult.txHash,
-                        mintTx: mintResult.txHash,
-                        blockNumber: mintResult.blockNumber,
-                        timestamp: new Date().toISOString()
-                    }
-                }),
-                headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
-            };
-
-        } else {
-            console.log('❌ Unlucky. No mint.');
-
-            // Return sukses (Kalah)
-            return {
-                statusCode: 200,
-                body: JSON.stringify({
-                    success: true,
-                    message: "Sorry, not lucky this time. Better luck next time!",
-                    data: {
-                        lucky: false,
-                        recipient: userAddress,
-                        paymentTx: transferResult.txHash,
-                        timestamp: new Date().toISOString()
-                    }
-                }),
-                headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
-            };
-        }
+        // Return success
+        return {
+            statusCode: 200,
+            body: JSON.stringify({
+                success: true,
+                message: "Payment received and 5 NFTs minted! 🎉", // <-- Diubah
+                data: {
+                    tokenIds: mintResult.tokenIds, // <-- Diubah
+                    nftContract: NFT_CONTRACT_ADDRESS,
+                    recipient: userAddress,
+                    paymentTx: transferResult.txHash,
+                    mintTx: mintResult.txHash,
+                    blockNumber: mintResult.blockNumber,
+                    timestamp: new Date().toISOString()
+                }
+            }),
+            headers: { 
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+            }
+        };
 
     } catch (error) {
+        // ... (Error handling tetap sama) ...
         console.error("❌ Error:", error);
-        
         let statusCode = 500;
         let errorMessage = error.message;
-
         if (error.message.includes('already processed')) statusCode = 409;
         else if (error.message.includes('Insufficient')) statusCode = 402;
         else if (error.message.includes('Invalid')) statusCode = 400;
@@ -301,7 +311,6 @@ exports.handler = async (event) => {
             statusCode = 503;
             errorMessage = 'Service temporarily unavailable (insufficient gas)';
         }
-
         return {
             statusCode,
             body: JSON.stringify({ success: false, error: errorMessage }),
