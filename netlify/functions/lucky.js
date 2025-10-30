@@ -4,11 +4,8 @@ const { JsonRpcProvider, Wallet, Contract, Signature } = require('ethers');
 const NFT_CONTRACT_ADDRESS = "0xaa1b03eea35b55d8c15187fe8f57255d4c179113"; // Kontrak NFT Anda
 const PAYMENT_RECIPIENT = "0xD95A8764AA0dD4018971DE4Bc2adC09193b8A3c2"; // Dompet Anda
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"; // USDC di Base
-
-// --- PERUBAHAN ---
-const MINT_PRICE = "10000"; // 0.10 USDC (karena 6 desimal)
+const MINT_PRICE = "100000"; // 0.10 USDC (karena 6 desimal)
 const WIN_CHANCE_PERCENT = 2; // 50% Peluang menang
-// ---------------
 
 const { PROVIDER_URL, RELAYER_PRIVATE_KEY } = process.env;
 const provider = new JsonRpcProvider(PROVIDER_URL || "https://mainnet.base.org");
@@ -19,7 +16,7 @@ if (RELAYER_PRIVATE_KEY) {
     backendWallet = new Wallet(RELAYER_PRIVATE_KEY, provider);
 }
 
-// ABIs (Tetap sama)
+// ABIs
 const USDC_ABI = [
     'function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s) external',
     'function balanceOf(address account) view returns (uint256)'
@@ -34,17 +31,13 @@ const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a
 const processedAuthorizations = new Set();
 const processedMints = new Set();
 
-// Fungsi executeUSDCTransfer (Tetap sama)
+// Fungsi executeUSDCTransfer
 async function executeUSDCTransfer(authorization, signature) {
     try {
         const { from, to, value, validAfter, validBefore, nonce } = authorization;
-
         console.log('Executing USDC transfer:', { from, to, value, nonce });
-
         if (!backendWallet) throw new Error('Backend wallet not configured');
-
         const usdcContract = new Contract(USDC_ADDRESS, USDC_ABI, backendWallet);
-
         const authKey = `${from}-${nonce}`.toLowerCase();
         if (processedAuthorizations.has(authKey)) {
             throw new Error('Authorization already processed');
@@ -55,7 +48,6 @@ async function executeUSDCTransfer(authorization, signature) {
         if (to.toLowerCase() !== PAYMENT_RECIPIENT.toLowerCase()) {
             throw new Error('Invalid payment recipient');
         }
-
         let sig;
         try {
             sig = Signature.from(signature);
@@ -63,46 +55,38 @@ async function executeUSDCTransfer(authorization, signature) {
             throw new Error('Invalid signature format');
         }
         const { v, r, s } = sig;
-
         console.log('Calling transferWithAuthorization...');
         const tx = await usdcContract.transferWithAuthorization(
             from, to, value, validAfter, validBefore, nonce, v, r, s
         );
-        
         const receipt = await tx.wait();
         console.log('Transfer confirmed in block:', receipt.blockNumber);
-
         processedAuthorizations.add(authKey);
         return { success: true, txHash: receipt.hash, from, amount: value };
-
     } catch (error) {
         console.error('USDC transfer error:', error);
         throw error;
     }
 }
 
-// Fungsi mintNFT (Tetap sama)
+// Fungsi mintNFT
 async function mintNFT(recipientAddress) {
     try {
         console.log('Minting NFT to:', recipientAddress);
         if (!backendWallet) throw new Error('Backend wallet not configured');
-
         const mintKey = recipientAddress.toLowerCase();
         if (processedMints.has(mintKey)) {
             throw new Error('Already minted for this address');
         }
-
         const nftContract = new Contract(NFT_CONTRACT_ADDRESS, NFT_ABI, backendWallet);
         const balance = await provider.getBalance(backendWallet.address);
         if (balance < BigInt(1e15)) { // 0.001 ETH
             throw new Error('Insufficient gas in backend wallet');
         }
-
         console.log('Calling mint function...');
         const tx = await nftContract.mint(recipientAddress, 1, { gasLimit: 200000 });
         const receipt = await tx.wait();
         console.log('Mint confirmed in block:', receipt.blockNumber);
-
         let tokenId;
         for (const log of receipt.logs) {
             if (log.address.toLowerCase() === NFT_CONTRACT_ADDRESS.toLowerCase() &&
@@ -115,10 +99,8 @@ async function mintNFT(recipientAddress) {
         if (!tokenId) {
             tokenId = (await nftContract.totalSupply()).toString();
         }
-
         processedMints.add(mintKey);
         setTimeout(() => processedMints.delete(mintKey), 3600000);
-
         return { success: true, tokenId, txHash: receipt.hash, blockNumber: receipt.blockNumber };
     } catch (error) {
         console.error('Mint error:', error);
@@ -127,7 +109,7 @@ async function mintNFT(recipientAddress) {
 }
 
 // =================================================================
-// HANDLER (FUNGSI UTAMA) - INI YANG DIMODIFIKASI
+// HANDLER (FUNGSI UTAMA)
 // =================================================================
 exports.handler = async (event) => {
     // CORS preflight
@@ -144,7 +126,7 @@ exports.handler = async (event) => {
 
     const xPaymentHeader = event.headers['x-payment'] || event.headers['X-Payment'];
 
-    // --- GET REQUEST: (Deskripsi diubah) ---
+    // --- GET REQUEST: (outputSchema diperbaiki) ---
     if (event.httpMethod === 'GET' || !xPaymentHeader) {
         return {
             statusCode: 402,
@@ -155,23 +137,50 @@ exports.handler = async (event) => {
                 accepts: [{
                     scheme: "exact",
                     network: "base",
-                    maxAmountRequired: MINT_PRICE, // Harga baru
+                    maxAmountRequired: MINT_PRICE,
                     resource: `https://${event.headers.host}${event.path}`,
-                    description: `Try to mint if you think you're lucky enough. ${WIN_CHANCE_PERCENT}% chance!`, // Deskripsi baru
+                    description: `Try to mint if you think you're lucky enough. ${WIN_CHANCE_PERCENT}% chance!`,
                     mimeType: "application/json",
                     image: "https://raw.githubusercontent.com/riz877/pic/refs/heads/main/G4SIxPcXEAAuo7O.jpg",
                     payTo: PAYMENT_RECIPIENT,
                     asset: USDC_ADDRESS,
                     maxTimeoutSeconds: 3600,
-                    outputSchema: { // Skema output diubah
-                        input: { /* ... (sama seperti sebelumnya) ... */ },
+                    outputSchema: {
+                        // --- PERBAIKAN DIMULAI DISINI ---
+                        input: { 
+                            type: "http", 
+                            method: "POST",
+                            properties: {
+                                x402Version: { type: "number" },
+                                scheme: { type: "string" },
+                                network: { type: "string" },
+                                payload: {
+                                    type: "object",
+                                    properties: {
+                                        signature: { type: "string" },
+                                        authorization: {
+                                            type: "object",
+                                            properties: {
+                                                from: { type: "string" },
+                                                to: { type: "string" },
+                                                value: { type: "string" },
+                                                validAfter: { type: "string" },
+                                                validBefore: { type: "string" },
+                                                nonce: { type: "string" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        // --- PERBAIKAN SELESAI ---
                         output: { 
                             success: "boolean",
                             message: "string",
                             data: {
                                 type: "object",
                                 properties: {
-                                    lucky: { type: "boolean" }, // Ditambah
+                                    lucky: { type: "boolean" },
                                     tokenId: { type: "string" },
                                     nftContract: { type: "string" },
                                     recipient: { type: "string" },
@@ -186,8 +195,8 @@ exports.handler = async (event) => {
                         version: "2",
                         contractAddress: NFT_CONTRACT_ADDRESS,
                         paymentAddress: PAYMENT_RECIPIENT,
-                        autoMint: false, // Diubah ke false, karena tidak otomatis
-                        description: "Lucky draw minting upon payment" // Deskripsi baru
+                        autoMint: false,
+                        description: "Lucky draw minting upon payment"
                     }
                 }]
             }),
@@ -199,7 +208,7 @@ exports.handler = async (event) => {
         };
     }
 
-    // --- POST REQUEST: (Logika minting diubah) ---
+    // --- POST REQUEST: (Logika minting) ---
     try {
         const payloadJson = Buffer.from(xPaymentHeader, 'base64').toString('utf8');
         const payload = JSON.parse(payloadJson);
@@ -220,12 +229,10 @@ exports.handler = async (event) => {
         console.log('👤 User address:', userAddress);
         console.log('💰 Payment amount:', authorization.value, 'USDC (expected:', MINT_PRICE, ')');
 
-        // Step 1: Eksekusi transfer USDC (Selalu dilakukan)
+        // Step 1: Eksekusi transfer USDC
         console.log('Step 1: Executing USDC transfer...');
         const transferResult = await executeUSDCTransfer(authorization, signature);
         console.log('✅ Transfer successful:', transferResult.txHash);
-
-        // --- PERUBAHAN LOGIKA DIMULAI DISINI ---
 
         // Step 2: Tentukan keberuntungan
         console.log('Step 2: Rolling the dice...');
@@ -264,7 +271,7 @@ exports.handler = async (event) => {
         } else {
             console.log('❌ Unlucky. No mint.');
 
-            // Return sukses (Kalah - pembayaran tetap diambil)
+            // Return sukses (Kalah)
             return {
                 statusCode: 200,
                 body: JSON.stringify({
@@ -273,17 +280,15 @@ exports.handler = async (event) => {
                     data: {
                         lucky: false,
                         recipient: userAddress,
-                        paymentTx: transferResult.txHash, // Kirim bukti bayar
+                        paymentTx: transferResult.txHash,
                         timestamp: new Date().toISOString()
                     }
                 }),
                 headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
             };
         }
-        // --- PERUBAHAN LOGIKA SELESAI ---
 
     } catch (error) {
-        // Ini menangani error jika pembayaran GAGAL (misal: saldo tidak cukup, signature salah)
         console.error("❌ Error:", error);
         
         let statusCode = 500;

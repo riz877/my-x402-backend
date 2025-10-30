@@ -132,11 +132,7 @@ async function mintNFT(recipientAddress) {
             throw new Error('Backend wallet not configured');
         }
 
-        // Check if already minted for this address recently
-        const mintKey = recipientAddress.toLowerCase();
-        if (processedMints.has(mintKey)) {
-            throw new Error('Already minted for this address');
-        }
+        
 
         const nftContract = new Contract(NFT_CONTRACT_ADDRESS, NFT_ABI, backendWallet);
 
@@ -177,9 +173,7 @@ async function mintNFT(recipientAddress) {
             tokenId = totalSupply.toString();
         }
 
-        // Mark as processed (with 1 hour expiry in real implementation)
-        processedMints.add(mintKey);
-        setTimeout(() => processedMints.delete(mintKey), 3600000); // 1 hour
+        
 
         return {
             success: true,
