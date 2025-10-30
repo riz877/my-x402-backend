@@ -218,7 +218,7 @@ exports.handler = async (event) => {
                     resource: `https://${event.headers.host}${event.path}`,
                     description: "the hood runs deep in 402. Pay 2 USDC to mint NFT",
                     mimeType: "application/json",
-                    image: "https://raw.githubusercontent.com/riz877/pic/refs/heads/main/G4SIxPcXEAAuo7O.jpg",
+                    image: "https://raw.githubusercontent.com/riz877/pic/refs/heads/main/hood.png",
                     payTo: PAYMENT_RECIPIENT,
                     asset: USDC_ADDRESS,
                     maxTimeoutSeconds: 3600,
