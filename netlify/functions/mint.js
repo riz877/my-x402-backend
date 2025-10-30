@@ -1,8 +1,8 @@
-const { JsonRpcProvider, Wallet, Contract } = require('ethers');
+const { JsonRpcProvider, Wallet, Contract, Signature } = require('ethers'); // Ditambahkan 'Signature'
 
 // --- CONFIGURATION ---
 const NFT_CONTRACT_ADDRESS = "0xaa1b03eea35b55d8c15187fe8f57255d4c179113";
-const PAYMENT_RECIPIENT = "0xD95A8764AA0dD4018971DE4Bc2adC09193b8A3c2";
+const PAYMENT_RECICIPIENT = "0xD95A8764AA0dD4018971DE4Bc2adC09193b8A3c2";
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const MINT_PRICE = "2000000"; // 2 USDC
 
@@ -34,7 +34,9 @@ const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a
 const processedAuthorizations = new Set();
 const processedMints = new Set();
 
-// Execute USDC transfer with authorization
+// =================================================================
+// FUNGSI INI TELAH DIPERBARUI
+// =================================================================
 async function executeUSDCTransfer(authorization, signature) {
     try {
         const { from, to, value, validAfter, validBefore, nonce } = authorization;
@@ -68,18 +70,34 @@ async function executeUSDCTransfer(authorization, signature) {
             throw new Error('Invalid payment recipient');
         }
 
-        // Execute receiveWithAuthorization
-        console.log('Calling receiveWithAuthorization...');
+        // --- PERBAIKAN DIMULAI DISINI ---
+
+        // 1. Pecah signature menjadi v, r, s
+        let sig;
+        try {
+            sig = Signature.from(signature);
+        } catch (e) {
+            console.error("Invalid signature format:", signature);
+            throw new Error('Invalid signature format');
+        }
+        const { v, r, s } = sig;
+
+        // 2. Panggil transferWithAuthorization (BUKAN receiveWithAuthorization)
+        console.log('Calling transferWithAuthorization...');
         
-        const tx = await usdcContract.receiveWithAuthorization(
+        const tx = await usdcContract.transferWithAuthorization(
             from,
             to,
             value,
             validAfter,
             validBefore,
             nonce,
-            signature
+            v,  // Gunakan v
+            r,  // Gunakan r
+            s   // Gunakan s
         );
+
+        // --- PERBAIKAN SELESAI ---
 
         console.log('Transfer tx sent:', tx.hash);
         const receipt = await tx.wait();
@@ -100,6 +118,10 @@ async function executeUSDCTransfer(authorization, signature) {
         throw error;
     }
 }
+// =================================================================
+// AKHIR DARI FUNGSI YANG DIPERBARUI
+// =================================================================
+
 
 // Mint NFT
 async function mintNFT(recipientAddress) {
