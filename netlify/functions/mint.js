@@ -1,5 +1,5 @@
 // File: netlify/functions/mint.js
-const { JsonRpcProvider, Wallet, Contract, isAddress, Signature } = require('ethers');
+const { JsonRpcProvider, Wallet, Contract, isAddress } = require('ethers');
 
 // --- 1. CONFIGURATION AND SETUP ---
 const NFT_CONTRACT_ADDRESS = "0xaa1b03eea35b55d8c15187fe8f57255d4c179113";
@@ -22,18 +22,46 @@ const NFT_ABI = [
   "function mint(address _to, uint256 _mintAmount)"
 ];
 
-const USDC_ABI = [
-  "function receiveWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s) external",
-  "function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s) external",
-  "function balanceOf(address account) view returns (uint256)"
-];
-
 // TOPIC HASH for Transfer event
 const USDC_TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 
-// --- UTILITY FUNCTION: Verify USDC Transfer in Receipt ---
-const getPayerAddressFromReceipt = (receipt, expectedFrom) => {
-    console.log("Checking transaction logs for USDC transfer...");
+// --- UTILITY: Extract transaction hash from various formats ---
+const extractTxHash = (payload) => {
+  console.log("Attempting to extract transaction hash...");
+  
+  // If it's a string starting with 0x, it's likely the hash itself
+  if (typeof payload === 'string' && payload.startsWith('0x')) {
+    return payload;
+  }
+  
+  // Try various nested structures
+  const locations = [
+    payload.transactionHash,
+    payload.txHash,
+    payload.hash,
+    payload.tx,
+    payload.txId,
+    payload.proof?.transactionHash,
+    payload.proof?.txHash,
+    payload.proof?.hash,
+    payload.data?.transactionHash,
+    payload.data?.hash,
+    payload.payment?.transactionHash,
+    payload.payment?.hash
+  ];
+  
+  for (const loc of locations) {
+    if (loc && typeof loc === 'string' && loc.startsWith('0x')) {
+      return loc;
+    }
+  }
+  
+  return null;
+};
+
+// --- UTILITY: Verify USDC Transfer in Receipt ---
+const verifyUSDCPayment = (receipt) => {
+    console.log("Verifying USDC payment in transaction receipt...");
     
     for (const log of receipt.logs) {
         if (log.address.toLowerCase() === USDC_ASSET_ADDRESS.toLowerCase() && 
@@ -43,18 +71,29 @@ const getPayerAddressFromReceipt = (receipt, expectedFrom) => {
             const toAddress = '0x' + log.topics[2].substring(26);
             const amount = BigInt(log.data);
             
-            console.log(`Transfer: ${fromAddress} → ${toAddress}, Amount: ${amount.toString()}`);
+            console.log(`Found Transfer: ${fromAddress} → ${toAddress}, Amount: ${amount.toString()}`);
             
-            // Verify: correct sender, correct recipient, correct amount
-            if (fromAddress.toLowerCase() === expectedFrom.toLowerCase() &&
-                toAddress.toLowerCase() === X402_RECIPIENT_ADDRESS.toLowerCase() &&
+            // Verify: payment went to X402 recipient with correct amount
+            if (toAddress.toLowerCase() === X402_RECIPIENT_ADDRESS.toLowerCase() &&
                 amount >= BigInt(MINT_COST_USDC)) {
                 
-                console.log(`✅ Valid USDC transfer verified`);
-                return fromAddress;
+                console.log(`✅ Valid USDC payment verified!`);
+                return {
+                  payer: fromAddress,
+                  recipient: toAddress,
+                  amount: amount.toString()
+                };
+            } else {
+                console.log(`❌ Transfer doesn't match requirements`);
+                console.log(`  Expected recipient: ${X402_RECIPIENT_ADDRESS}`);
+                console.log(`  Actual recipient: ${toAddress}`);
+                console.log(`  Expected amount: >= ${MINT_COST_USDC}`);
+                console.log(`  Actual amount: ${amount.toString()}`);
             }
         }
     }
+    
+    console.log("❌ No valid USDC transfer found in transaction");
     return null;
 }
 
@@ -76,15 +115,14 @@ exports.handler = async (event, context) => {
   }
 
   // =======================================================
-  // 1. PAYMENT FLOW: Execute receiveWithAuthorization & Mint
+  // 1. PAYMENT FLOW: Verify USDC payment & Mint NFT
   // =======================================================
   if (xPaymentHeader && event.httpMethod === 'POST') {
     console.log("=== PAYMENT VERIFICATION STARTED ===");
+    console.log("Raw X-Payment header:", xPaymentHeader);
 
-    let userAddress;
-    let usdcTxHash;
-    let authData;
-    let signature;
+    let txHash;
+    let paymentInfo;
     let decodedPayload;
 
     try {
@@ -92,46 +130,50 @@ exports.handler = async (event, context) => {
         const payloadJson = Buffer.from(xPaymentHeader, 'base64').toString('utf8');
         decodedPayload = JSON.parse(payloadJson);
         
-        console.log("DECODED PAYLOAD:", JSON.stringify(decodedPayload, null, 2));
+        console.log("DECODED PAYLOAD:");
+        console.log(JSON.stringify(decodedPayload, null, 2));
         
-        // Extract authorization data
-        if (!decodedPayload.payload || !decodedPayload.payload.authorization) {
-            throw new Error("Missing authorization data in payment proof");
-        }
-        
-        authData = decodedPayload.payload.authorization;
-        signature = decodedPayload.payload.signature;
-        
-        userAddress = authData.from;
-        
-        console.log(`User Address: ${userAddress}`);
-        console.log(`Payment To: ${authData.to}`);
-        console.log(`Amount: ${authData.value}`);
-        console.log(`Nonce: ${authData.nonce}`);
-        console.log(`Signature: ${signature}`);
-        
-        // Verify authorization details
-        if (authData.to.toLowerCase() !== X402_RECIPIENT_ADDRESS.toLowerCase()) {
-            throw new Error("Authorization recipient does not match expected address");
-        }
-        
-        if (authData.value !== MINT_COST_USDC) {
-            throw new Error(`Incorrect payment amount. Expected ${MINT_COST_USDC}, got ${authData.value}`);
-        }
-        
-        // Check if user is valid address
-        if (!isAddress(userAddress)) {
-            throw new Error("Invalid user address");
+        // Extract transaction hash
+        txHash = extractTxHash(decodedPayload);
+
+        if (!txHash) {
+            console.error("Could not find transaction hash in payload");
+            console.error("Available keys:", Object.keys(decodedPayload));
+            throw new Error("Missing transaction hash in payment proof. Please provide the USDC transfer transaction hash.");
         }
 
-        console.log("✅ Authorization data validated");
+        console.log(`Transaction hash found: ${txHash}`);
+        console.log(`Fetching receipt from Base network...`);
+
+        // Get transaction receipt from blockchain
+        const receipt = await provider.getTransactionReceipt(txHash);
+
+        if (!receipt) {
+            throw new Error(`Transaction ${txHash} not found on Base network. Please ensure it's confirmed.`);
+        }
+
+        if (receipt.status !== 1) {
+            throw new Error(`Transaction ${txHash} failed on-chain (status: ${receipt.status}).`);
+        }
+
+        console.log(`✅ Transaction confirmed in block: ${receipt.blockNumber}`);
+
+        // Verify it's a valid USDC payment to our address
+        paymentInfo = verifyUSDCPayment(receipt);
+        
+        if (!paymentInfo) {
+            throw new Error(`Transaction ${txHash} does not contain a valid USDC payment of ${MINT_COST_USDC} (2 USDC) to ${X402_RECIPIENT_ADDRESS}`);
+        }
+
+        console.log(`✅ Payment verified from: ${paymentInfo.payer}`);
 
     } catch (error) {
-        console.error("❌ Payment Proof Validation Failed:", error);
+        console.error("❌ Payment Verification Failed:", error);
         return {
             statusCode: 403,
             body: JSON.stringify({ 
-                error: `Invalid payment proof: ${error.message}`
+                error: `Payment verification failed: ${error.message}`,
+                hint: "Please send 2 USDC to the payment address and provide the transaction hash"
             }),
             headers: { 
                 'Content-Type': 'application/json',
@@ -140,113 +182,13 @@ exports.handler = async (event, context) => {
         };
     }
 
-    // Execute the USDC transfer using receiveWithAuthorization
-    try {
-        const usdcContract = new Contract(USDC_ASSET_ADDRESS, USDC_ABI, relayerWallet);
-        
-        // Split signature into v, r, s components
-        const sig = Signature.from(signature);
-        
-        console.log("Signature components:");
-        console.log(`  v: ${sig.v}`);
-        console.log(`  r: ${sig.r}`);
-        console.log(`  s: ${sig.s}`);
-        
-        console.log("Executing receiveWithAuthorization (anyone can submit, payment goes to X402 recipient)...");
-        
-        // Use receiveWithAuthorization - this is for receiving payments
-        // The msg.sender (relayer) executes, but payment goes from 'from' to 'to'
-        const tx = await usdcContract.receiveWithAuthorization(
-            authData.from,      // from: user who signed
-            authData.to,        // to: X402 recipient (must be msg.sender for receiveWithAuthorization)
-            authData.value,
-            authData.validAfter,
-            authData.validBefore,
-            authData.nonce,
-            sig.v,
-            sig.r,
-            sig.s
-        );
-        
-        usdcTxHash = tx.hash;
-        console.log(`USDC Transfer TX sent: ${usdcTxHash}`);
-        
-        const receipt = await tx.wait();
-        console.log(`✅ USDC Transfer confirmed in block ${receipt.blockNumber}`);
-        
-        // Verify the transfer in the receipt
-        const verifiedPayer = getPayerAddressFromReceipt(receipt, userAddress);
-        
-        if (!verifiedPayer) {
-            throw new Error("USDC transfer not found in transaction receipt");
-        }
-        
-    } catch (error) {
-        console.error("❌ USDC Transfer Failed:", error);
-        console.error("Full error:", JSON.stringify(error, null, 2));
-        
-        // Check if authorization was already used
-        if (error.message && error.message.includes("authorization is used")) {
-            return {
-                statusCode: 409,
-                body: JSON.stringify({ 
-                    error: "This payment authorization has already been used"
-                }),
-                headers: { 
-                    'Content-Type': 'application/json',
-                    'Access-Control-Allow-Origin': '*'
-                }
-            };
-        }
-        
-        // Check for invalid signature
-        if (error.message && error.message.includes("invalid signature")) {
-            return {
-                statusCode: 403,
-                body: JSON.stringify({ 
-                    error: "Invalid signature. This might be a signing issue with the x402 client."
-                }),
-                headers: { 
-                    'Content-Type': 'application/json',
-                    'Access-Control-Allow-Origin': '*'
-                }
-            };
-        }
-        
-        // Check for caller must be payee error
-        if (error.message && error.message.includes("caller must be the payee")) {
-            return {
-                statusCode: 500,
-                body: JSON.stringify({ 
-                    error: "Authorization method mismatch. The relayer must be the payment recipient for receiveWithAuthorization."
-                }),
-                headers: { 
-                    'Content-Type': 'application/json',
-                    'Access-Control-Allow-Origin': '*'
-                }
-            };
-        }
-        
-        return {
-            statusCode: 500,
-            body: JSON.stringify({ 
-                error: "Failed to execute USDC transfer",
-                details: error.message
-            }),
-            headers: { 
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            }
-        };
-    }
-
-    // Mint NFT to user
+    // Mint NFT to the payer
     try {
         const nftContract = new Contract(NFT_CONTRACT_ADDRESS, NFT_ABI, relayerWallet);
         
-        console.log(`Minting NFT to ${userAddress}...`);
+        console.log(`Minting NFT to payer: ${paymentInfo.payer}...`);
         
-        const mintTx = await nftContract.mint(userAddress, 1);
+        const mintTx = await nftContract.mint(paymentInfo.payer, 1);
         console.log(`Mint TX sent: ${mintTx.hash}`);
         
         const mintReceipt = await mintTx.wait();
@@ -257,10 +199,11 @@ exports.handler = async (event, context) => {
             body: JSON.stringify({
                 message: "Payment received and NFT minted successfully!",
                 data: { 
-                    recipient: userAddress,
-                    usdcTransferHash: usdcTxHash,
+                    recipient: paymentInfo.payer,
+                    paymentTransactionHash: txHash,
                     mintTransactionHash: mintTx.hash,
-                    blockNumber: mintReceipt.blockNumber
+                    blockNumber: mintReceipt.blockNumber,
+                    amountPaid: paymentInfo.amount
                 }
             }),
             headers: { 
@@ -272,12 +215,12 @@ exports.handler = async (event, context) => {
     } catch (error) {
         console.error("❌ NFT Minting Failed:", error);
         
-        // Payment succeeded but minting failed - this is a critical error
         return {
             statusCode: 500,
             body: JSON.stringify({ 
-                error: "USDC payment succeeded but NFT minting failed. Please contact support.",
-                usdcTransferHash: usdcTxHash,
+                error: "USDC payment verified but NFT minting failed. Please contact support.",
+                paymentTransactionHash: txHash,
+                payer: paymentInfo.payer,
                 details: error.message
             }),
             headers: { 
