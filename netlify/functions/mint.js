@@ -13,7 +13,6 @@ const NFT_ABI = [
     "function mint(address _to, uint256 _mintAmount) external"
 ];
 
-// CORRECTED USDC ABI with transferWithAuthorization
 const USDC_ABI = [
     "function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, bytes signature) external",
     "function transfer(address to, uint256 value) external returns (bool)",
@@ -47,29 +46,15 @@ exports.handler = async (event) => {
             statusCode: 402,
             body: JSON.stringify({
                 error: "Payment Required",
-                message: "Pay 2 USDC to mint NFT",
-                x402Version: 1,
+                message: "Pay 2 USDC to mint your NFT",
                 accepts: [{
                     scheme: "exact",
                     network: "base",
-                    payTo: PAYMENT_ADDRESS,
                     asset: USDC_ADDRESS,
+                    payTo: PAYMENT_ADDRESS,
                     maxAmountRequired: MINT_PRICE,
-                    maxTimeoutSeconds: 600,
-                    resource: resourceUrl,
                     description: "the hood runs deep in 402",
-                    mimeType: "application/json",
-                    image: "https://raw.githubusercontent.com/riz877/pic/refs/heads/main/G4SIxPcXEAAuo7O.jpg",
-                    outputSchema: {
-                        type: "object",
-                        properties: {
-                            success: { type: "boolean" },
-                            message: { type: "string" },
-                            recipient: { type: "string" },
-                            mintTx: { type: "string" },
-                            paymentTx: { type: "string" }
-                        }
-                    }
+                    image: "https://raw.githubusercontent.com/riz877/pic/refs/heads/main/G4SIxPcXEAAuo7O.jpg"
                 }]
             }),
             headers: {
