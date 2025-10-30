@@ -1,86 +1,176 @@
-const { JsonRpcProvider } = require('ethers');
+const { JsonRpcProvider, Wallet, Contract } = require('ethers');
 
 // --- CONFIGURATION ---
 const NFT_CONTRACT_ADDRESS = "0xaa1b03eea35b55d8c15187fe8f57255d4c179113";
 const PAYMENT_RECIPIENT = "0xD95A8764AA0dD4018971DE4Bc2adC09193b8A3c2";
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-const MINT_PRICE = "2000000"; // 2 USDC (6 decimals)
+const MINT_PRICE = "2000000"; // 2 USDC
 
-const { PROVIDER_URL } = process.env;
+const { PROVIDER_URL, RELAYER_PRIVATE_KEY } = process.env;
 const provider = new JsonRpcProvider(PROVIDER_URL || "https://mainnet.base.org");
 
-// Event signatures
+// Backend wallet untuk execute transfers & minting
+let backendWallet;
+if (RELAYER_PRIVATE_KEY) {
+    backendWallet = new Wallet(RELAYER_PRIVATE_KEY, provider);
+}
+
+// ABIs
+const USDC_ABI = [
+    'function receiveWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, bytes signature) external',
+    'function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s) external',
+    'function balanceOf(address account) view returns (uint256)',
+    'event Transfer(address indexed from, address indexed to, uint256 value)'
+];
+
+const NFT_ABI = [
+    'function mint(address to, uint256 amount) public',
+    'function totalSupply() public view returns (uint256)',
+    'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)'
+];
+
 const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 
-// In-memory storage (untuk production gunakan Redis/Database)
-const processedPayments = new Set();
+const processedAuthorizations = new Set();
+const processedMints = new Set();
 
-// Verify USDC payment
-const verifyUSDCPayment = (receipt, expectedPayer) => {
-    for (const log of receipt.logs) {
-        // Check if this is USDC contract
-        if (log.address.toLowerCase() !== USDC_ADDRESS.toLowerCase()) continue;
-        
-        // Check if this is Transfer event
-        if (log.topics[0] !== TRANSFER_TOPIC) continue;
-        
-        try {
-            const from = '0x' + log.topics[1].substring(26);
-            const to = '0x' + log.topics[2].substring(26);
-            const amount = BigInt(log.data);
-            
-            console.log('USDC Transfer found:', {
-                from,
-                to,
-                amount: amount.toString()
-            });
-            
-            // Verify: correct sender, correct recipient, correct amount
-            if (from.toLowerCase() === expectedPayer.toLowerCase() &&
-                to.toLowerCase() === PAYMENT_RECIPIENT.toLowerCase() &&
-                amount >= BigInt(MINT_PRICE)) {
-                return true;
-            }
-        } catch (e) {
-            console.error('Error parsing USDC log:', e);
-            continue;
-        }
-    }
-    return false;
-};
+// Execute USDC transfer with authorization
+async function executeUSDCTransfer(authorization, signature) {
+    try {
+        const { from, to, value, validAfter, validBefore, nonce } = authorization;
 
-// Verify NFT mint
-const verifyNFTMint = (receipt, expectedRecipient) => {
-    for (const log of receipt.logs) {
-        // Check if this is NFT contract
-        if (log.address.toLowerCase() !== NFT_CONTRACT_ADDRESS.toLowerCase()) continue;
-        
-        // Check if this is Transfer event
-        if (log.topics[0] !== TRANSFER_TOPIC) continue;
-        
-        try {
-            const from = '0x' + log.topics[1].substring(26);
-            const to = '0x' + log.topics[2].substring(26);
-            const tokenId = BigInt(log.topics[3] || log.data).toString();
-            
-            console.log('NFT Transfer found:', {
-                from,
-                to,
-                tokenId
-            });
-            
-            // NFT mint: from = 0x0 (zero address), to = recipient
-            if (from === '0x0000000000000000000000000000000000000000' &&
-                to.toLowerCase() === expectedRecipient.toLowerCase()) {
-                return tokenId;
-            }
-        } catch (e) {
-            console.error('Error parsing NFT log:', e);
-            continue;
+        console.log('Executing USDC transfer:', {
+            from,
+            to,
+            value,
+            nonce
+        });
+
+        if (!backendWallet) {
+            throw new Error('Backend wallet not configured');
         }
+
+        const usdcContract = new Contract(USDC_ADDRESS, USDC_ABI, backendWallet);
+
+        // Check if already processed
+        const authKey = `${from}-${nonce}`.toLowerCase();
+        if (processedAuthorizations.has(authKey)) {
+            throw new Error('Authorization already processed');
+        }
+
+        // Verify amount
+        if (BigInt(value) < BigInt(MINT_PRICE)) {
+            throw new Error(`Insufficient amount: ${value}, required: ${MINT_PRICE}`);
+        }
+
+        // Verify recipient
+        if (to.toLowerCase() !== PAYMENT_RECIPIENT.toLowerCase()) {
+            throw new Error('Invalid payment recipient');
+        }
+
+        // Execute receiveWithAuthorization
+        console.log('Calling receiveWithAuthorization...');
+        
+        const tx = await usdcContract.receiveWithAuthorization(
+            from,
+            to,
+            value,
+            validAfter,
+            validBefore,
+            nonce,
+            signature
+        );
+
+        console.log('Transfer tx sent:', tx.hash);
+        const receipt = await tx.wait();
+        console.log('Transfer confirmed in block:', receipt.blockNumber);
+
+        // Mark as processed
+        processedAuthorizations.add(authKey);
+
+        return {
+            success: true,
+            txHash: receipt.hash,
+            from,
+            amount: value
+        };
+
+    } catch (error) {
+        console.error('USDC transfer error:', error);
+        throw error;
     }
-    return null;
-};
+}
+
+// Mint NFT
+async function mintNFT(recipientAddress) {
+    try {
+        console.log('Minting NFT to:', recipientAddress);
+
+        if (!backendWallet) {
+            throw new Error('Backend wallet not configured');
+        }
+
+        // Check if already minted for this address recently
+        const mintKey = recipientAddress.toLowerCase();
+        if (processedMints.has(mintKey)) {
+            throw new Error('Already minted for this address');
+        }
+
+        const nftContract = new Contract(NFT_CONTRACT_ADDRESS, NFT_ABI, backendWallet);
+
+        // Check gas balance
+        const balance = await provider.getBalance(backendWallet.address);
+        console.log('Backend wallet balance:', (Number(balance) / 1e18).toFixed(4), 'ETH');
+
+        if (balance < BigInt(1e15)) { // 0.001 ETH
+            throw new Error('Insufficient gas in backend wallet');
+        }
+
+        // Mint NFT
+        console.log('Calling mint function...');
+        const tx = await nftContract.mint(recipientAddress, 1, {
+            gasLimit: 200000 // Set reasonable gas limit
+        });
+
+        console.log('Mint tx sent:', tx.hash);
+        const receipt = await tx.wait();
+        console.log('Mint confirmed in block:', receipt.blockNumber);
+
+        // Extract token ID from Transfer event
+        let tokenId;
+        for (const log of receipt.logs) {
+            if (log.address.toLowerCase() === NFT_CONTRACT_ADDRESS.toLowerCase() &&
+                log.topics[0] === TRANSFER_TOPIC) {
+                
+                const from = '0x' + log.topics[1].substring(26);
+                if (from === '0x0000000000000000000000000000000000000000') {
+                    tokenId = BigInt(log.topics[3]).toString();
+                    break;
+                }
+            }
+        }
+
+        if (!tokenId) {
+            const totalSupply = await nftContract.totalSupply();
+            tokenId = totalSupply.toString();
+        }
+
+        // Mark as processed (with 1 hour expiry in real implementation)
+        processedMints.add(mintKey);
+        setTimeout(() => processedMints.delete(mintKey), 3600000); // 1 hour
+
+        return {
+            success: true,
+            tokenId,
+            txHash: receipt.hash,
+            blockNumber: receipt.blockNumber
+        };
+
+    } catch (error) {
+        console.error('Mint error:', error);
+        throw error;
+    }
+}
 
 exports.handler = async (event) => {
     // CORS preflight
@@ -104,67 +194,67 @@ exports.handler = async (event) => {
             body: JSON.stringify({
                 x402Version: 1,
                 error: "Payment Required",
-                message: "Pay 2 USDC, mint your NFT, then submit proof",
-                instructions: {
-                    step1: {
-                        action: "Send 2 USDC",
-                        to: PAYMENT_RECIPIENT,
-                        amount: "2 USDC",
-                        token: USDC_ADDRESS,
-                        network: "Base",
-                        note: "Send from the same wallet you'll use to mint"
-                    },
-                    step2: {
-                        action: "Mint your NFT",
-                        contract: NFT_CONTRACT_ADDRESS,
-                        function: "mint(address _to, uint256 _mintAmount)",
-                        parameters: {
-                            _to: "Your wallet address",
-                            _mintAmount: "1"
-                        },
-                        network: "Base",
-                        note: "Call this function from your contract interface"
-                    },
-                    step3: {
-                        action: "Submit verification",
-                        method: "POST to this endpoint",
-                        header: "X-Payment: base64(json)",
-                        payload: {
-                            mintTxHash: "0x... (your mint transaction hash)"
-                        }
-                    }
-                },
+                message: "Send x402 payment authorization to mint NFT",
                 accepts: [{
                     scheme: "exact",
                     network: "base",
                     maxAmountRequired: MINT_PRICE,
                     resource: `https://${event.headers.host}${event.path}`,
-                    description: "the hood runs deep in 402. Pay 2 USDC + mint your own NFT",
+                    description: "the hood runs deep in 402. Pay 2 USDC to mint NFT",
                     mimeType: "application/json",
                     image: "https://raw.githubusercontent.com/riz877/pic/refs/heads/main/G4SIxPcXEAAuo7O.jpg",
                     payTo: PAYMENT_RECIPIENT,
                     asset: USDC_ADDRESS,
-                    maxTimeoutSeconds: 3600, // 1 hour
+                    maxTimeoutSeconds: 3600,
                     outputSchema: {
                         input: { 
                             type: "http", 
                             method: "POST",
                             properties: {
-                                mintTxHash: { type: "string" }
+                                x402Version: { type: "number" },
+                                scheme: { type: "string" },
+                                network: { type: "string" },
+                                payload: {
+                                    type: "object",
+                                    properties: {
+                                        signature: { type: "string" },
+                                        authorization: {
+                                            type: "object",
+                                            properties: {
+                                                from: { type: "string" },
+                                                to: { type: "string" },
+                                                value: { type: "string" },
+                                                validAfter: { type: "string" },
+                                                validBefore: { type: "string" },
+                                                nonce: { type: "string" }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         },
                         output: { 
                             success: "boolean",
-                            message: "string", 
-                            verified: "boolean",
-                            tokenId: "string"
+                            message: "string",
+                            data: {
+                                type: "object",
+                                properties: {
+                                    tokenId: { type: "string" },
+                                    nftContract: { type: "string" },
+                                    recipient: { type: "string" },
+                                    paymentTx: { type: "string" },
+                                    mintTx: { type: "string" }
+                                }
+                            }
                         }
                     },
                     extra: {
                         name: "USD Coin",
-                        version: "1",
+                        version: "2",
                         contractAddress: NFT_CONTRACT_ADDRESS,
-                        paymentAddress: PAYMENT_RECIPIENT
+                        paymentAddress: PAYMENT_RECIPIENT,
+                        autoMint: true,
+                        description: "Automatic NFT minting upon payment verification"
                     }
                 }]
             }),
@@ -176,27 +266,21 @@ exports.handler = async (event) => {
         };
     }
 
-    // --- POST REQUEST: Verify payment + mint ---
+    // --- POST REQUEST: Process x402 payment ---
     try {
         // Parse X-Payment header
         const payloadJson = Buffer.from(xPaymentHeader, 'base64').toString('utf8');
         const payload = JSON.parse(payloadJson);
         
         console.log("📨 Received payload:", JSON.stringify(payload, null, 2));
-        
-        // Extract mint transaction hash
-        const mintTxHash = payload.mintTxHash || 
-                          payload.transactionHash || 
-                          payload.txHash || 
-                          payload.hash;
-        
-        if (!mintTxHash) {
+
+        // Validate x402 format
+        if (!payload.x402Version || payload.x402Version !== 1) {
             return {
                 statusCode: 400,
                 body: JSON.stringify({ 
                     success: false,
-                    error: "Missing mint transaction hash",
-                    hint: "Provide 'mintTxHash' in your payload"
+                    error: "Invalid x402 version" 
                 }),
                 headers: { 
                     'Content-Type': 'application/json', 
@@ -205,50 +289,12 @@ exports.handler = async (event) => {
             };
         }
 
-        // Normalize tx hash
-        const normalizedTxHash = mintTxHash.toLowerCase();
-
-        // Check if already processed
-        if (processedPayments.has(normalizedTxHash)) {
-            return {
-                statusCode: 409,
-                body: JSON.stringify({ 
-                    success: false,
-                    error: "This mint transaction has already been verified" 
-                }),
-                headers: { 
-                    'Content-Type': 'application/json', 
-                    'Access-Control-Allow-Origin': '*' 
-                }
-            };
-        }
-
-        console.log(`🔍 Verifying mint transaction: ${mintTxHash}`);
-
-        // Get mint transaction receipt
-        const mintReceipt = await provider.getTransactionReceipt(mintTxHash);
-
-        if (!mintReceipt) {
-            return {
-                statusCode: 404,
-                body: JSON.stringify({ 
-                    success: false,
-                    error: "Mint transaction not found on Base network",
-                    hint: "Make sure you're on Base mainnet and transaction is confirmed"
-                }),
-                headers: { 
-                    'Content-Type': 'application/json', 
-                    'Access-Control-Allow-Origin': '*' 
-                }
-            };
-        }
-
-        if (mintReceipt.status !== 1) {
+        if (!payload.payload || !payload.payload.authorization || !payload.payload.signature) {
             return {
                 statusCode: 400,
                 body: JSON.stringify({ 
                     success: false,
-                    error: "Mint transaction failed on-chain" 
+                    error: "Missing authorization or signature in payload" 
                 }),
                 headers: { 
                     'Content-Type': 'application/json', 
@@ -257,113 +303,35 @@ exports.handler = async (event) => {
             };
         }
 
-        // Get minter address from transaction
-        const mintTx = await provider.getTransaction(mintTxHash);
-        const minter = mintTx.from;
+        const { authorization, signature } = payload.payload;
+        const userAddress = authorization.from;
 
-        console.log(`👤 Minter address: ${minter}`);
+        console.log('👤 User address:', userAddress);
+        console.log('💰 Payment amount:', authorization.value, 'USDC (expected:', MINT_PRICE, ')');
 
-        // Verify NFT was minted
-        const tokenId = verifyNFTMint(mintReceipt, minter);
-        
-        if (!tokenId) {
-            return {
-                statusCode: 403,
-                body: JSON.stringify({ 
-                    success: false,
-                    error: "No NFT mint found in this transaction",
-                    hint: "Make sure you called the mint function on the correct contract"
-                }),
-                headers: { 
-                    'Content-Type': 'application/json', 
-                    'Access-Control-Allow-Origin': '*' 
-                }
-            };
-        }
+        // Step 1: Execute USDC transfer
+        console.log('Step 1: Executing USDC transfer...');
+        const transferResult = await executeUSDCTransfer(authorization, signature);
+        console.log('✅ Transfer successful:', transferResult.txHash);
 
-        console.log(`✅ NFT mint verified: Token #${tokenId} minted to ${minter}`);
+        // Step 2: Mint NFT
+        console.log('Step 2: Minting NFT...');
+        const mintResult = await mintNFT(userAddress);
+        console.log('✅ Mint successful: Token #', mintResult.tokenId);
 
-        // Now verify USDC payment
-        // Search in recent blocks (mint block ± 1000 blocks ~ 30 minutes on Base)
-        let paymentVerified = false;
-        let paymentTxHash = null;
-        
-        const mintBlock = mintReceipt.blockNumber;
-        const searchFromBlock = Math.max(0, mintBlock - 1000);
-        const searchToBlock = mintBlock;
-
-        console.log(`🔎 Searching for USDC payment from ${minter}`);
-        console.log(`   Blocks: ${searchFromBlock} to ${searchToBlock}`);
-
-        // Search for USDC payment
-        for (let blockNum = searchToBlock; blockNum >= searchFromBlock; blockNum--) {
-            try {
-                const block = await provider.getBlock(blockNum, true);
-                
-                if (!block || !block.transactions) continue;
-
-                // Check each transaction in block
-                for (const txHash of block.transactions) {
-                    try {
-                        const receipt = await provider.getTransactionReceipt(txHash);
-                        
-                        if (!receipt || receipt.status !== 1) continue;
-
-                        // Check if this transaction has USDC payment from minter
-                        if (verifyUSDCPayment(receipt, minter)) {
-                            console.log(`✅ Found USDC payment in tx: ${txHash}`);
-                            paymentVerified = true;
-                            paymentTxHash = txHash;
-                            break;
-                        }
-                    } catch (e) {
-                        // Skip failed transactions
-                        continue;
-                    }
-                }
-                
-                if (paymentVerified) break;
-
-            } catch (e) {
-                console.error(`Error checking block ${blockNum}:`, e.message);
-                continue;
-            }
-        }
-
-        if (!paymentVerified) {
-            return {
-                statusCode: 403,
-                body: JSON.stringify({ 
-                    success: false,
-                    error: "No valid USDC payment found",
-                    hint: `Please send 2 USDC to ${PAYMENT_RECIPIENT} from ${minter} within 30 minutes before/after minting`,
-                    searched: `Blocks ${searchFromBlock} to ${searchToBlock}`
-                }),
-                headers: { 
-                    'Content-Type': 'application/json', 
-                    'Access-Control-Allow-Origin': '*' 
-                }
-            };
-        }
-
-        // Mark as processed
-        processedPayments.add(normalizedTxHash);
-
-        console.log(`🎉 Full verification successful!`);
-
+        // Return success
         return {
             statusCode: 200,
             body: JSON.stringify({
                 success: true,
-                verified: true,
-                message: "Payment and mint verified successfully! 🎉",
+                message: "Payment received and NFT minted! 🎉",
                 data: {
-                    minter: minter,
-                    tokenId: tokenId,
+                    tokenId: mintResult.tokenId,
                     nftContract: NFT_CONTRACT_ADDRESS,
-                    mintTransaction: mintTxHash,
-                    paymentTransaction: paymentTxHash,
-                    blockNumber: mintReceipt.blockNumber,
+                    recipient: userAddress,
+                    paymentTx: transferResult.txHash,
+                    mintTx: mintResult.txHash,
+                    blockNumber: mintResult.blockNumber,
                     timestamp: new Date().toISOString()
                 }
             }),
@@ -374,15 +342,27 @@ exports.handler = async (event) => {
         };
 
     } catch (error) {
-        console.error("❌ Verification error:", error);
+        console.error("❌ Error:", error);
         
+        let statusCode = 500;
+        let errorMessage = error.message;
+
+        if (error.message.includes('already processed')) {
+            statusCode = 409;
+        } else if (error.message.includes('Insufficient')) {
+            statusCode = 402;
+        } else if (error.message.includes('Invalid')) {
+            statusCode = 400;
+        } else if (error.message.includes('gas')) {
+            statusCode = 503;
+            errorMessage = 'Service temporarily unavailable (insufficient gas)';
+        }
+
         return {
-            statusCode: 500,
+            statusCode,
             body: JSON.stringify({ 
                 success: false,
-                error: "Verification failed",
-                message: error.message,
-                hint: "Please contact support if this persists"
+                error: errorMessage
             }),
             headers: { 
                 'Content-Type': 'application/json',
