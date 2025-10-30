@@ -45,6 +45,7 @@ exports.handler = async (event) => {
         return {
             statusCode: 402,
             body: JSON.stringify({
+                x402Version: 1,
                 error: "Payment Required",
                 message: "Pay 2 USDC to mint your NFT",
                 accepts: [{
@@ -53,6 +54,9 @@ exports.handler = async (event) => {
                     asset: USDC_ADDRESS,
                     payTo: PAYMENT_ADDRESS,
                     maxAmountRequired: MINT_PRICE,
+                    maxTimeoutSeconds: 600,
+                    resource: resourceUrl,
+                    mimeType: "application/json",
                     description: "the hood runs deep in 402",
                     image: "https://raw.githubusercontent.com/riz877/pic/refs/heads/main/G4SIxPcXEAAuo7O.jpg"
                 }]
