@@ -1,7 +1,7 @@
 // File: netlify/functions/mint.js
 const { JsonRpcProvider, Wallet, Contract } = require('ethers');
 
-const NFT_ADDRESS = "0xaa1b03eea35b55d8c15187fe8f57255d4c179113";
+const NFT_CONTRACT_ADDRESS = "0xaa1b03eea35b55d8c15187fe8f57255d4c179113";
 const PAYMENT_ADDRESS = "0xD95A8764AA0dD4018971DE4Bc2adC09193b8A3c2";
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const MINT_PRICE = "2000000"; // 2 USDC
@@ -777,7 +777,7 @@ const NFT_ABI = [
         "stateMutability": "nonpayable",
         "type": "function"
     }
-];
+]
 
 const USDC_ABI = [
   {
@@ -899,9 +899,9 @@ const USDC_ABI = [
     "name": "Transfer",
     "type": "event"
   }
-];
+]
 
-const nftContract = new Contract(NFT_ADDRESS, NFT_ABI, wallet);
+const nftContract = new Contract(NFT_CONTRACT_ADDRESS, NFT_ABI, wallet);
 const usdcContract = new Contract(USDC_ADDRESS, USDC_ABI, wallet);
 
 const processedNonces = new Set();
@@ -927,6 +927,7 @@ exports.handler = async (event) => {
         return {
             statusCode: 402,
             body: JSON.stringify({
+                error: "Payment Required",  // ← REQUIRED FIELD
                 x402Version: 1,
                 accepts: [{
                     scheme: "exact",
