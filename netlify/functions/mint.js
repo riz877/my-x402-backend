@@ -92,14 +92,32 @@ function generateCoinbaseJWT() {
         const encodedPayload = Buffer.from(JSON.stringify(payload)).toString('base64url');
         const message = `${encodedHeader}.${encodedPayload}`;
 
-        const privateKeyBuffer = Buffer.from(CDP_PRIVATE_KEY, 'base64'); // From env
-        
+        // CDP_PRIVATE_KEY can be provided either as a base64-encoded DER PKCS8
+        // blob, or as a PEM string. Normalize both cases to a DER Buffer.
+        let privateKeyDerBuffer;
+        if (typeof CDP_PRIVATE_KEY === 'string' && CDP_PRIVATE_KEY.includes('-----BEGIN')) {
+            // PEM provided: import and export DER PKCS8
+            try {
+                const keyObj = crypto.createPrivateKey({ key: CDP_PRIVATE_KEY, format: 'pem', type: 'pkcs8' });
+                privateKeyDerBuffer = keyObj.export({ format: 'der', type: 'pkcs8' });
+            } catch (pemErr) {
+                throw new Error('Failed to parse PEM CDP_PRIVATE_KEY: ' + pemErr.message);
+            }
+        } else {
+            // Assume base64-encoded DER
+            try {
+                privateKeyDerBuffer = Buffer.from(CDP_PRIVATE_KEY, 'base64');
+            } catch (b64Err) {
+                throw new Error('CDP_PRIVATE_KEY is not valid base64 or PEM');
+            }
+        }
+
         const sign = crypto.createSign('SHA256');
         sign.update(message);
         sign.end();
-        
+
         const signature = sign.sign({
-            key: privateKeyBuffer,
+            key: privateKeyDerBuffer,
             format: 'der',
             type: 'pkcs8'
         }, 'base64url');
@@ -562,6 +580,33 @@ exports.handler = async (event) => {
         console.log('💰 Amount:', authorization.value);
 
         console.log('\n=== STEP 1: TRANSFER ===');
+
+        // Quick provider/RPC health-check: if the JsonRpcProvider cannot
+        // detect the network or returns non-JSON responses, bail early with
+        // a clear 503 so we don't attempt transfers that will fail.
+        try {
+            if (!provider) {
+                if (!CDP_RPC_URL) throw new Error('CDP_RPC_URL not set');
+                provider = new JsonRpcProvider(CDP_RPC_URL);
+            }
+            // getNetwork will throw if the RPC URL is wrong or node is down
+            await provider.getNetwork();
+        } catch (provErr) {
+            console.error('❌ Provider/RPC unreachable:', provErr.message);
+            // Try to report the health failure to CDP but don't block on it
+            try {
+                await reportToCoinbaseCDP({ type: 'health_check_failure', error: provErr.message, status: 'failed' });
+            } catch (e) {
+                // swallow reporting errors
+            }
+
+            return {
+                statusCode: 503,
+                headers,
+                body: JSON.stringify({ success: false, error: 'Blockchain provider unreachable or RPC URL invalid. Check CDP_RPC_URL.' })
+            };
+        }
+
         const transferResult = await executeUSDCTransfer(authorization, signature);
 
         console.log('\n=== STEP 2: MINT ===');
