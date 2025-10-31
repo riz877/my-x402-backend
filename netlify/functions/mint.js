@@ -413,6 +413,50 @@ exports.handler = async (event) => {
                 payTo: PAYMENT_RECIPIENT,
                 asset: USDC_ADDRESS,
                 maxTimeoutSeconds: 3600,
+                // Describe the expected POST input so scanners like x402scan
+                // can detect that this resource accepts a POST payment payload.
+                outputSchema: {
+                    input: {
+                        type: "http",
+                        method: "POST",
+                        properties: {
+                            x402Version: { type: "number" },
+                            scheme: { type: "string" },
+                            network: { type: "string" },
+                            payload: {
+                                type: "object",
+                                properties: {
+                                    signature: { type: "string" },
+                                    authorization: {
+                                        type: "object",
+                                        properties: {
+                                            from: { type: "string" },
+                                            to: { type: "string" },
+                                            value: { type: "string" },
+                                            validAfter: { type: "string" },
+                                            validBefore: { type: "string" },
+                                            nonce: { type: "string" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    output: {
+                        success: "boolean",
+                        message: "string",
+                        data: {
+                            type: "object",
+                            properties: {
+                                tokenId: { type: "string" },
+                                nftContract: { type: "string" },
+                                recipient: { type: "string" },
+                                paymentTx: { type: "string" },
+                                mintTx: { type: "string" }
+                            }
+                        }
+                    }
+                },
                 extra: {
                     name: "Hood NFT",
                     contractAddress: NFT_CONTRACT_ADDRESS,
