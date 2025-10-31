@@ -360,7 +360,7 @@ exports.handler = async (event) => {
     const xPaymentHeader = event.headers['x-payment'] || event.headers['X-Payment'];
 
     // BLOK GET INI SEKARANG AMAN KARENA COLD START CRASH DICEGAH
-    if (event.httpMethod === 'GET' || !xPaymentHeader) {
+    if (event.httpMethod === 'GET' || event.httpMethod === 'HEAD' || !xPaymentHeader) {
         const resource = `https://${event.headers.host}${event.path}`;
         
         return {
