@@ -1,9 +1,11 @@
 const { JsonRpcProvider, Wallet, Contract, Signature } = require('ethers');
 const axios = require('axios');
 const crypto = require('crypto');
-const FACILITATOR_CONFIG = require('../../facilitator-config');
+// --- PERUBAHAN UTAMA DI SINI ---
+// Path diubah, dengan asumsi 'facilitator-config.js' ada di folder yang sama
+const FACILITATOR_CONFIG = require('./facilitator-config');
 
-// --- CONFIGURATION ---
+// --- KONFIGURASI LAIN ---
 const NFT_CONTRACT_ADDRESS = "0x03657531f55ab9b03f5aef07d1af79c070e50366";
 const PAYMENT_RECIPIENT = "0x2e6e06f71786955474d35293b09a3527debbbfce";
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
@@ -11,8 +13,7 @@ const MINT_PRICE = "1000000"; // 1 USDC
 
 const { RELAYER_PRIVATE_KEY } = process.env;
 
-// --- PERBAIKAN COLD START DIMULAI DI SINI ---
-// Kita ubah 'const' jadi 'let' agar bisa di-handle di 'catch'
+// --- PERBAIKAN COLD START (Sudah bagus, tidak diubah) ---
 let provider;
 let backendWallet;
 
@@ -157,7 +158,7 @@ async function reportToCoinbaseCDP(transactionData) {
 }
 
 // =================================================================
-// EXECUTE USDC TRANSFER (Modifikasi kecil)
+// EXECUTE USDC TRANSFER (Tidak ada perubahan)
 // =================================================================
 async function executeUSDCTransfer(authorization, signature) {
     const { from, to, value, validAfter, validBefore, nonce } = authorization;
@@ -251,7 +252,7 @@ async function executeUSDCTransfer(authorization, signature) {
 }
 
 // =================================================================
-// MINT NFT (Modifikasi kecil)
+// MINT NFT (Tidak ada perubahan)
 // =================================================================
 async function mintNFT(recipientAddress) {
     console.log('🎨 Minting NFT to:', recipientAddress);
@@ -359,8 +360,19 @@ exports.handler = async (event) => {
 
     const xPaymentHeader = event.headers['x-payment'] || event.headers['X-Payment'];
 
-    // BLOK GET INI SEKARANG AMAN KARENA COLD START CRASH DICEGAH
+    // BLOK GET INI SEKARANG AMAN KARENA 'require' SUDAH BENAR
     if (event.httpMethod === 'GET' || event.httpMethod === 'HEAD' || !xPaymentHeader) {
+        
+        // Periksa apakah config ter-load
+        if (!FACILITATOR_CONFIG || !FACILITATOR_CONFIG.x402ServerId) {
+            console.error("❌ FATAL: facilitator-config.js tidak ter-load dengan benar!");
+            return {
+                statusCode: 500,
+                headers,
+                body: JSON.stringify({ error: "Server configuration error." })
+            };
+        }
+        
         const resource = `https://${event.headers.host}${event.path}`;
         
         return {
@@ -375,8 +387,8 @@ exports.handler = async (event) => {
                 x402Version: 1,
                 error: "Payment Required",
                 message: "the hood runs deep in 402. Pay 1 USDC to mint NFT",
-                serverId: FACILITATOR_CONFIG.x402ServerId,
-                cdpProjectId: FACILITATOR_CONFIG.cdpProjectId,
+                serverId: FACILITATOR_CONFIG.x402ServerId, // Ini sekarang akan berhasil
+                cdpProjectId: FACILITATOR_CONFIG.cdpProjectId, // Ini sekarang akan berhasil
                 provider: "Coinbase CDP",
                 accepts: [{
                     scheme: "exact",
