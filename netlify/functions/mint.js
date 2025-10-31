@@ -1,389 +1,163 @@
-const { JsonRpcProvider, Wallet, Contract, Signature } = require('ethers'); // Ditambahkan 'Signature'
+/*
+================================================================================
+THIS IS THE **COINBASE FACILITATOR** (EXPRESS + SERVERLESS)
+This code uses Coinbase's `paymentMiddleware` to get listed on x402scan.
+It calls your `mintNFT` logic *after* Coinbase verifies the payment.
 
-// --- CONFIGURATION ---
+**This code REPLACES your `executeUSDCTransfer` function.**
+================================================================================
+*/
+
+// === SECTION 1: IMPORTS ===
+const express = require('express');
+const serverless = require('serverless-http'); // Required to run Express on Netlify
+const { ethers, Contract, Wallet } = require('ethers');
+const { facilitator } = require('@coinbase/x402'); // The official Coinbase Facilitator
+const { paymentMiddleware } = require('x402-express'); // The Coinbase Middleware
+
+// === SECTION 2: CONSTANTS (SAFE TO DEFINE GLOBALLY) ===
+// NO 'new Wallet()' or 'new Provider()' here! This is the fix.
 const NFT_CONTRACT_ADDRESS = "0xaa1b03eea35b55d8c15187fe8f57255d4c179113";
 const PAYMENT_RECIPIENT = "0xD95A8764AA0dD4018971DE4Bc2adC09193b8A3c2";
-const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-const MINT_PRICE = "2000000"; // 2 USDC
-
-const { PROVIDER_URL, RELAYER_PRIVATE_KEY } = process.env;
-const provider = new JsonRpcProvider(PROVIDER_URL || "https://mainnet.base.org");
-
-// Backend wallet untuk execute transfers & minting
-let backendWallet;
-if (RELAYER_PRIVATE_KEY) {
-    backendWallet = new Wallet(RELAYER_PRIVATE_KEY, provider);
-}
+const MINT_PRICE_USD = "2.00"; // Coinbase middleware needs this format
 
 // ABIs
-const USDC_ABI = [
-    'function receiveWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, bytes signature) external',
-    'function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s) external',
-    'function balanceOf(address account) view returns (uint256)',
-    'event Transfer(address indexed from, address indexed to, uint256 value)'
-];
-
 const NFT_ABI = [
-    'function mint(address to, uint256 amount) public',
+    'function mint(address to, uint256 amount) public', // Fixed typo here
     'function totalSupply() public view returns (uint256)',
     'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)'
 ];
-
 const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 
-const processedAuthorizations = new Set();
-const processedMints = new Set();
 
-// =================================================================
-// FUNGSI INI TELAH DIPERBARUI
-// =================================================================
-async function executeUSDCTransfer(authorization, signature) {
+// === SECTION 3: MINTING LOGIC (LAZY-LOADED) ===
+// This cache variable will store the wallet after the first POST request
+let _cachedBackendWallet = null;
+
+/**
+ * This function initializes the Provider and Wallet ON-DEMAND.
+ * It is ONLY called by the POST handler, never by the GET handler.
+ * This prevents the startup crash/timeout.
+ */
+function getBackendWallet() {
+    if (_cachedBackendWallet) return _cachedBackendWallet;
+
+    const { RELAYER_PRIVATE_KEY, PROVIDER_URL } = process.env;
+    if (!RELAYER_PRIVATE_KEY || !PROVIDER_URL) {
+        console.error("FATAL: RELAYER_PRIVATE_KEY or PROVIDER_URL is not set in Netlify.");
+        throw new Error("Relayer (Minting) configuration is incomplete.");
+    }
+
     try {
-        const { from, to, value, validAfter, validBefore, nonce } = authorization;
-
-        console.log('Executing USDC transfer:', {
-            from,
-            to,
-            value,
-            nonce
-        });
-
-        if (!backendWallet) {
-            throw new Error('Backend wallet not configured');
-        }
-
-        const usdcContract = new Contract(USDC_ADDRESS, USDC_ABI, backendWallet);
-
-        // Check if already processed
-        const authKey = `${from}-${nonce}`.toLowerCase();
-        if (processedAuthorizations.has(authKey)) {
-            throw new Error('Authorization already processed');
-        }
-
-        // Verify amount
-        if (BigInt(value) < BigInt(MINT_PRICE)) {
-            throw new Error(`Insufficient amount: ${value}, required: ${MINT_PRICE}`);
-        }
-
-        // Verify recipient
-        if (to.toLowerCase() !== PAYMENT_RECIPIENT.toLowerCase()) {
-            throw new Error('Invalid payment recipient');
-        }
-
-        // --- PERBAIKAN DIMULAI DISINI ---
-
-        // 1. Pecah signature menjadi v, r, s
-        let sig;
-        try {
-            sig = Signature.from(signature);
-        } catch (e) {
-            console.error("Invalid signature format:", signature);
-            throw new Error('Invalid signature format');
-        }
-        const { v, r, s } = sig;
-
-        // 2. Panggil transferWithAuthorization (BUKAN receiveWithAuthorization)
-        console.log('Calling transferWithAuthorization...');
-        
-        const tx = await usdcContract.transferWithAuthorization(
-            from,
-            to,
-            value,
-            validAfter,
-            validBefore,
-            nonce,
-            v,  // Gunakan v
-            r,  // Gunakan r
-            s   // Gunakan s
-        );
-
-        // --- PERBAIKAN SELESAI ---
-
-        console.log('Transfer tx sent:', tx.hash);
-        const receipt = await tx.wait();
-        console.log('Transfer confirmed in block:', receipt.blockNumber);
-
-        // Mark as processed
-        processedAuthorizations.add(authKey);
-
-        return {
-            success: true,
-            txHash: receipt.hash,
-            from,
-            amount: value
-        };
-
-    } catch (error) {
-        console.error('USDC transfer error:', error);
-        throw error;
+        const provider = new ethers.JsonRpcProvider(PROVIDER_URL);
+        _cachedBackendWallet = new Wallet(RELAYER_PRIVATE_KEY, provider);
+        console.log("Relayer (Minting) Wallet initialized. Address:", _cachedBackendWallet.address);
+        return _cachedBackendWallet;
+    } catch (e) {
+        console.error("Failed to initialize relayer wallet:", e.message);
+        throw new Error("RELAYER_PRIVATE_KEY or PROVIDER_URL is invalid.");
     }
 }
-// =================================================================
-// AKHIR DARI FUNGSI YANG DIPERBARUI
-// =================================================================
 
-
-// Mint NFT
+/**
+ * Your custom minting logic.
+ * It now calls `getBackendWallet()` to safely get the relayer.
+ */
 async function mintNFT(recipientAddress) {
-    try {
-        console.log('Minting NFT to:', recipientAddress);
+  try {
+    console.log(`[Mint Logic] Starting NFT mint to: ${recipientAddress}`);
+    
+    const backendWallet = getBackendWallet();
+    const nftContract = new Contract(NFT_CONTRACT_ADDRESS, NFT_ABI, backendWallet);
 
-        if (!backendWallet) {
-            throw new Error('Backend wallet not configured');
-        }
+    const balance = await backendWallet.provider.getBalance(backendWallet.address);
+    console.log(`[Mint Logic] Relayer Balance: ${(Number(balance) / 1e18).toFixed(4)} ETH`);
+    if (balance < BigInt(1e15)) { // 0.001 ETH
+        throw new Error('Insufficient gas in relayer wallet');
+    }
 
-        
+    console.log('[Mint Logic] Calling contract.mint()...');
+    const tx = await nftContract.mint(recipientAddress, 1, { gasLimit: 200000 });
+    const receipt = await tx.wait();
+    console.log(`[Mint Logic] Mint confirmed: ${receipt.hash}`);
 
-        const nftContract = new Contract(NFT_CONTRACT_ADDRESS, NFT_ABI, backendWallet);
-
-        // Check gas balance
-        const balance = await provider.getBalance(backendWallet.address);
-        console.log('Backend wallet balance:', (Number(balance) / 1e18).toFixed(4), 'ETH');
-
-        if (balance < BigInt(1e15)) { // 0.001 ETH
-            throw new Error('Insufficient gas in backend wallet');
-        }
-
-        // Mint NFT
-        console.log('Calling mint function...');
-        const tx = await nftContract.mint(recipientAddress, 1, {
-            gasLimit: 200000 // Set reasonable gas limit
-        });
-
-        console.log('Mint tx sent:', tx.hash);
-        const receipt = await tx.wait();
-        console.log('Mint confirmed in block:', receipt.blockNumber);
-
-        // Extract token ID from Transfer event
-        let tokenId;
-        for (const log of receipt.logs) {
-            if (log.address.toLowerCase() === NFT_CONTRACT_ADDRESS.toLowerCase() &&
-                log.topics[0] === TRANSFER_TOPIC) {
-                
-                const from = '0x' + log.topics[1].substring(26);
-                if (from === '0x0000000000000000000000000000000000000000') {
-                    tokenId = BigInt(log.topics[3]).toString();
-                    break;
-                }
+    let tokenId = 'unknown';
+    for (const log of receipt.logs) {
+        if (log.address.toLowerCase() === NFT_CONTRACT_ADDRESS.toLowerCase() && log.topics[0] === TRANSFER_TOPIC) {
+            const from = '0x' + log.topics[1].substring(26);
+            if (from === '0x0000000000000000000000000000000000000000') {
+                tokenId = BigInt(log.topics[3]).toString();
+                break;
             }
         }
-
-        if (!tokenId) {
-            const totalSupply = await nftContract.totalSupply();
-            tokenId = totalSupply.toString();
-        }
-
-        
-
-        return {
-            success: true,
-            tokenId,
-            txHash: receipt.hash,
-            blockNumber: receipt.blockNumber
-        };
-
-    } catch (error) {
-        console.error('Mint error:', error);
-        throw error;
     }
+    console.log(`[Mint Logic] Token ID found: ${tokenId}`);
+    return { success: true, tokenId, txHash: receipt.hash };
+  } catch (error) {
+    console.error('[Mint Logic] Error during minting:', error.message);
+    throw error;
+  }
 }
 
-exports.handler = async (event) => {
-    // CORS preflight
-    if (event.httpMethod === 'OPTIONS') {
-        return {
-            statusCode: 204,
-            headers: {
-                'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Headers': 'Content-Type, X-Payment',
-                'Access-Control-Allow-Methods': 'GET, POST, OPTIONS'
-            }
-        };
+// === SECTION 4: EXPRESS SERVER SETUP ===
+
+const app = express(); // Initialize Express
+
+// --- A. Coinbase Facilitator Middleware (THE IMPORTANT PART) ---
+// This middleware runs FIRST. It handles the GET request for the 402 check.
+// It uses your CDP_API_KEY_ID and CDP_API_KEY_SECRET from env vars.
+app.use(
+  '/', // Protect the root of this function (e.g., .../functions/mint)
+  paymentMiddleware(
+    PAYMENT_RECIPIENT, // Where the USDC payment goes
+    {
+      'POST /': {
+        price: `$${MINT_PRICE_USD}`,
+        network: 'base',
+        config: {
+          description: 'the hood runs deep in 402. Pay 2 USDC to mint NFT',
+          image: 'https://raw.githubusercontent.com/riz877/pic/refs/heads/main/hood.png',
+        },
+      },
+    },
+    facilitator // Use the official Coinbase facilitator
+  )
+);
+
+// --- B. Your Custom Mint Handler (The POST Request) ---
+// This code ONLY runs AFTER the `paymentMiddleware` has successfully
+// verified the payment.
+app.post('/', async (req, res) => {
+  try {
+    const userAddress = req.x402?.from;
+    if (!userAddress) {
+      console.error('[Route Handler] Payment verified, but `req.x402.from` was not found!');
+      return res.status(400).json({ error: 'User address not found after payment.' });
     }
 
-    const xPaymentHeader = event.headers['x-payment'] || event.headers['X-Payment'];
+    console.log(`[Route Handler] Payment verified via Coinbase from: ${userAddress}.`);
+    
+    // THIS is where your relayer wallet is finally loaded
+    console.log('[Route Handler] Initiating custom mint process...');
+    const mintResult = await mintNFT(userAddress); // Call your mint logic
 
-    // --- GET REQUEST: Return 402 with instructions ---
-    if (event.httpMethod === 'GET' || !xPaymentHeader) {
-        return {
-            statusCode: 402,
-            body: JSON.stringify({
-                x402Version: 1,
-                error: "Payment Required",
-                message: "Send x402 payment authorization to mint NFT",
-                accepts: [{
-                    scheme: "exact",
-                    network: "base",
-                    maxAmountRequired: MINT_PRICE,
-                    resource: `https://${event.headers.host}${event.path}`,
-                    description: "the hood runs deep in 402. Pay 2 USDC to mint NFT",
-                    mimeType: "application/json",
-                    image: "https://raw.githubusercontent.com/riz877/pic/refs/heads/main/hood.png",
-                    payTo: PAYMENT_RECIPIENT,
-                    asset: USDC_ADDRESS,
-                    maxTimeoutSeconds: 3600,
-                    outputSchema: {
-                        input: { 
-                            type: "http", 
-                            method: "POST",
-                            properties: {
-                                x402Version: { type: "number" },
-                                scheme: { type: "string" },
-                                network: { type: "string" },
-                                payload: {
-                                    type: "object",
-                                    properties: {
-                                        signature: { type: "string" },
-                                        authorization: {
-                                            type: "object",
-                                            properties: {
-                                                from: { type: "string" },
-                                                to: { type: "string" },
-                                                value: { type: "string" },
-                                                validAfter: { type: "string" },
-                                                validBefore: { type: "string" },
-                                                nonce: { type: "string" }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        },
-                        output: { 
-                            success: "boolean",
-                            message: "string",
-                            data: {
-                                type: "object",
-                                properties: {
-                                    tokenId: { type: "string" },
-                                    nftContract: { type: "string" },
-                                    recipient: { type: "string" },
-                                    paymentTx: { type: "string" },
-                                    mintTx: { type: "string" }
-                                }
-                            }
-                        }
-                    },
-                    extra: {
-                        name: "USD Coin",
-                        version: "2",
-                        contractAddress: NFT_CONTRACT_ADDRESS,
-                        paymentAddress: PAYMENT_RECIPIENT,
-                        autoMint: true,
-                        description: "Automatic NFT minting upon payment verification"
-                    }
-                }]
-            }),
-            headers: {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*',
-                'Cache-Control': 'no-cache'
-            }
-        };
-    }
+    console.log(`[Route Handler] SUCCESS: Token #${mintResult.tokenId} minted for ${userAddress}`);
+    res.status(200).json({
+      success: true,
+      message: 'Payment received (via Coinbase) and NFT minted!',
+      data: {
+        tokenId: mintResult.tokenId,
+        mintTx: mintResult.txHash,
+      },
+    });
 
-    // --- POST REQUEST: Process x402 payment ---
-    try {
-        // Parse X-Payment header
-        const payloadJson = Buffer.from(xPaymentHeader, 'base64').toString('utf8');
-        const payload = JSON.parse(payloadJson);
-        
-        console.log("📨 Received payload:", JSON.stringify(payload, null, 2));
+  } catch (error) {
+    console.error('[Route Handler] Error after payment verification:', error.message);
+    let statusCode = error.message.includes('gas') || error.message.includes('config') ? 503 : 500;
+    res.status(statusCode).json({ success: false, error: `Minting failed after payment: ${error.message}` });
+  }
+});
 
-        // Validate x402 format
-        if (!payload.x402Version || payload.x402Version !== 1) {
-            return {
-                statusCode: 400,
-                body: JSON.stringify({ 
-                    success: false,
-                    error: "Invalid x402 version" 
-                }),
-                headers: { 
-                    'Content-Type': 'application/json', 
-                    'Access-Control-Allow-Origin': '*' 
-                }
-            };
-        }
-
-        if (!payload.payload || !payload.payload.authorization || !payload.payload.signature) {
-            return {
-                statusCode: 400,
-                body: JSON.stringify({ 
-                    success: false,
-                    error: "Missing authorization or signature in payload" 
-                }),
-                headers: { 
-                    'Content-Type': 'application/json', 
-                    'Access-Control-Allow-Origin': '*' 
-                }
-            };
-        }
-
-        const { authorization, signature } = payload.payload;
-        const userAddress = authorization.from;
-
-        console.log('👤 User address:', userAddress);
-        console.log('💰 Payment amount:', authorization.value, 'USDC (expected:', MINT_PRICE, ')');
-
-        // Step 1: Execute USDC transfer
-        console.log('Step 1: Executing USDC transfer...');
-        const transferResult = await executeUSDCTransfer(authorization, signature);
-        console.log('✅ Transfer successful:', transferResult.txHash);
-
-        // Step 2: Mint NFT
-        console.log('Step 2: Minting NFT...');
-        const mintResult = await mintNFT(userAddress);
-        console.log('✅ Mint successful: Token #', mintResult.tokenId);
-
-        // Return success
-        return {
-            statusCode: 200,
-            body: JSON.stringify({
-                success: true,
-                message: "Payment received and NFT minted! 🎉",
-                data: {
-                    tokenId: mintResult.tokenId,
-                    nftContract: NFT_CONTRACT_ADDRESS,
-                    recipient: userAddress,
-                    paymentTx: transferResult.txHash,
-                    mintTx: mintResult.txHash,
-                    blockNumber: mintResult.blockNumber,
-                    timestamp: new Date().toISOString()
-                }
-            }),
-            headers: { 
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            }
-        };
-
-    } catch (error) {
-        console.error("❌ Error:", error);
-        
-        let statusCode = 500;
-        let errorMessage = error.message;
-
-        if (error.message.includes('already processed')) {
-            statusCode = 409;
-        } else if (error.message.includes('Insufficient')) {
-            statusCode = 402;
-        } else if (error.message.includes('Invalid')) {
-            statusCode = 400;
-        } else if (error.message.includes('gas')) {
-            statusCode = 503;
-            errorMessage = 'Service temporarily unavailable (insufficient gas)';
-        }
-
-        return {
-            statusCode,
-            body: JSON.stringify({ 
-                success: false,
-                error: errorMessage
-            }),
-            headers: { 
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            }
-        };
-    }
-};
+// === SECTION 5: EXPORT HANDLER FOR NETLIFY ===
+// Wrap the Express app with `serverless-http`
+exports.handler = serverless(app);
