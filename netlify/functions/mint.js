@@ -180,7 +180,6 @@ async function executeUSDCTransfer(authorization, signature) {
 
         processedAuthorizations.add(authKey);
 
-        // Report to CDP
         await reportToCoinbaseCDP({
             type: 'payment',
             txHash: receipt.hash,
@@ -241,7 +240,6 @@ async function mintNFT(recipientAddress) {
         const receipt = await tx.wait();
         console.log('✅ Minted in block:', receipt.blockNumber);
 
-        // Extract token ID
         let tokenId;
         for (const log of receipt.logs) {
             if (log.address.toLowerCase() === NFT_CONTRACT_ADDRESS.toLowerCase() &&
@@ -259,7 +257,6 @@ async function mintNFT(recipientAddress) {
             tokenId = totalSupply.toString();
         }
 
-        // Report to CDP
         await reportToCoinbaseCDP({
             type: 'nft_mint',
             txHash: receipt.hash,
@@ -293,10 +290,9 @@ async function mintNFT(recipientAddress) {
 }
 
 // =================================================================
-// NETLIFY HANDLER (NO EXPRESS)
+// NETLIFY HANDLER
 // =================================================================
 exports.handler = async (event) => {
-    // CORS
     const headers = {
         'Content-Type': 'application/json',
         'Access-Control-Allow-Origin': '*',
@@ -313,23 +309,30 @@ exports.handler = async (event) => {
 
     const xPaymentHeader = event.headers['x-payment'] || event.headers['X-Payment'];
 
-    // GET: Return 402 Payment Required
     if (event.httpMethod === 'GET' || !xPaymentHeader) {
+        const resource = `https://${event.headers.host}${event.path}`;
+        
         return {
             statusCode: 402,
-            headers: { ...headers, 'Cache-Control': 'no-cache' },
+            headers: {
+                ...headers,
+                'Cache-Control': 'no-cache',
+                'X-402-Version': '1',
+                'WWW-Authenticate': 'x402'
+            },
             body: JSON.stringify({
                 x402Version: 1,
                 error: "Payment Required",
-                message: "Send x402 payment authorization to mint NFT",
-                cdpProjectId: FACILITATOR_CONFIG.cdpProjectId,
+                message: "the hood runs deep in 402. Pay 1 USDC to mint NFT",
                 serverId: FACILITATOR_CONFIG.x402ServerId,
+                cdpProjectId: FACILITATOR_CONFIG.cdpProjectId,
                 provider: "Coinbase CDP",
                 accepts: [{
                     scheme: "exact",
                     network: "base",
                     maxAmountRequired: MINT_PRICE,
-                    resource: `https://${event.headers.host}${event.path}`,
+                    minAmountRequired: MINT_PRICE,
+                    resource: resource,
                     description: "the hood runs deep in 402. Pay 1 USDC to mint NFT",
                     mimeType: "application/json",
                     image: "https://raw.githubusercontent.com/riz877/pic/refs/heads/main/hood.png",
@@ -337,17 +340,18 @@ exports.handler = async (event) => {
                     asset: USDC_ADDRESS,
                     maxTimeoutSeconds: 3600,
                     extra: {
+                        name: "Hood NFT",
                         contractAddress: NFT_CONTRACT_ADDRESS,
                         paymentAddress: PAYMENT_RECIPIENT,
                         autoMint: true,
-                        poweredBy: "Coinbase CDP + x402"
+                        category: "nft",
+                        poweredBy: "Coinbase CDP"
                     }
                 }]
             })
         };
     }
 
-    // POST: Process Payment
     try {
         const payloadJson = Buffer.from(xPaymentHeader, 'base64').toString('utf8');
         const payload = JSON.parse(payloadJson);
@@ -376,15 +380,12 @@ exports.handler = async (event) => {
         console.log('👤 User:', userAddress);
         console.log('💰 Amount:', authorization.value);
 
-        // Step 1: Transfer
         console.log('\n=== STEP 1: TRANSFER ===');
         const transferResult = await executeUSDCTransfer(authorization, signature);
 
-        // Step 2: Mint
         console.log('\n=== STEP 2: MINT ===');
         const mintResult = await mintNFT(userAddress);
 
-        // Step 3: Final Report
         console.log('\n=== STEP 3: REPORT ===');
         await reportToCoinbaseCDP({
             type: 'complete_transaction',
