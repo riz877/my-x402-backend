@@ -245,7 +245,8 @@ exports.handler = async (event) => {
 
         // Step 1: Eksekusi transfer USDC
         console.log('Step 1: Executing USDC transfer...');
-        const transferResult = await executeUSDCTransfer(authorization, signature);
+            // Execute transfer with balance pre-check inside executeUSDCTransfer
+            const transferResult = await executeUSDCTransfer(authorization, signature);
         console.log('✅ Transfer successful:', transferResult.txHash);
 
         // Step 2: Tentukan keberuntungan

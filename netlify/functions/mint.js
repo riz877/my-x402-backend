@@ -226,12 +226,36 @@ async function executeUSDCTransfer(authorization, signature) {
 
     try {
         const usdcContract = new Contract(USDC_ADDRESS, USDC_ABI, backendWallet);
+
+        // Pre-check payer's USDC balance to provide a clearer error
+        try {
+            const userBalance = await usdcContract.balanceOf(from);
+            if (BigInt(userBalance) < BigInt(value)) {
+                throw new Error('Payer has insufficient USDC balance');
+            }
+        } catch (balErr) {
+            // If balanceOf call itself fails, continue and let transferWithAuthorization surface the error
+            console.warn('Warning: could not verify payer balance:', balErr.message);
+        }
+
         const sig = Signature.from(signature);
         const { v, r, s } = sig;
 
-        const tx = await usdcContract.transferWithAuthorization(
-            from, to, value, validAfter, validBefore, nonce, v, r, s
-        );
+        let tx;
+        try {
+            tx = await usdcContract.transferWithAuthorization(
+                from, to, value, validAfter, validBefore, nonce, v, r, s
+            );
+        } catch (err) {
+            // Map common revert reasons to friendlier messages
+            const reason = err.reason || err.error?.message || '';
+            if (reason.toLowerCase().includes('transfer amount exceeds balance') || reason.toLowerCase().includes('insufficient')) {
+                const userErr = new Error('Payment failed: payer has insufficient USDC balance');
+                userErr.original = err;
+                throw userErr;
+            }
+            throw err;
+        }
 
         console.log('📝 Transfer tx:', tx.hash);
         const receipt = await tx.wait();
