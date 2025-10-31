@@ -11,15 +11,31 @@ const MINT_PRICE = "1000000"; // 1 USDC
 
 const { RELAYER_PRIVATE_KEY } = process.env;
 
-// Use Coinbase CDP RPC
-const provider = new JsonRpcProvider(FACILITATOR_CONFIG.cdpRpcUrl);
-
+// --- PERBAIKAN COLD START DIMULAI DI SINI ---
+// Kita ubah 'const' jadi 'let' agar bisa di-handle di 'catch'
+let provider;
 let backendWallet;
-if (RELAYER_PRIVATE_KEY) {
-    backendWallet = new Wallet(RELAYER_PRIVATE_KEY, provider);
-}
 
-// ABIs
+try {
+    // Kode asli Anda tetap di sini, di dalam try...catch
+    provider = new JsonRpcProvider(FACILITATOR_CONFIG.cdpRpcUrl);
+    
+    if (RELAYER_PRIVATE_KEY) {
+        backendWallet = new Wallet(RELAYER_PRIVATE_KEY, provider);
+        console.log('✅ Wallet initialized on cold start.');
+    } else {
+        console.warn('⚠️ RELAYER_PRIVATE_KEY not set on cold start.');
+    }
+} catch (error) {
+    // Ini adalah TAMBAHAN untuk mencegah crash saat GET
+    console.error(`🔥 COLD START ERROR: ${error.message}. Wallet init will retry on POST.`);
+    provider = null; // Set ke null agar bisa dicoba lagi nanti
+    backendWallet = null;
+}
+// --- PERBAIKAN COLD START SELESAI ---
+
+
+// ABIs (Tidak ada perubahan)
 const USDC_ABI = [
     'function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s) external',
     'function balanceOf(address account) view returns (uint256)'
@@ -35,7 +51,7 @@ const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a
 const processedAuthorizations = new Set();
 
 // =================================================================
-// GENERATE COINBASE CDP JWT TOKEN
+// GENERATE COINBASE CDP JWT TOKEN (Tidak ada perubahan)
 // =================================================================
 function generateCoinbaseJWT() {
     try {
@@ -79,7 +95,7 @@ function generateCoinbaseJWT() {
 }
 
 // =================================================================
-// REPORT TO COINBASE CDP
+// REPORT TO COINBASE CDP (Tidak ada perubahan)
 // =================================================================
 async function reportToCoinbaseCDP(transactionData) {
     try {
@@ -141,13 +157,33 @@ async function reportToCoinbaseCDP(transactionData) {
 }
 
 // =================================================================
-// EXECUTE USDC TRANSFER
+// EXECUTE USDC TRANSFER (Modifikasi kecil)
 // =================================================================
 async function executeUSDCTransfer(authorization, signature) {
     const { from, to, value, validAfter, validBefore, nonce } = authorization;
 
     console.log('💸 Processing USDC transfer:', { from, to, value });
 
+    // --- TAMBAHAN: Cek jika wallet gagal dibuat saat cold start ---
+    if (!backendWallet) {
+        console.warn('Wallet not initialized. Retrying on-demand...');
+        try {
+            if (!RELAYER_PRIVATE_KEY) {
+                throw new Error('FATAL: RELAYER_PRIVATE_KEY env var not set');
+            }
+            if (!provider) { // Jika provider juga gagal
+                provider = new JsonRpcProvider(FACILITATOR_CONFIG.cdpRpcUrl);
+            }
+            backendWallet = new Wallet(RELAYER_PRIVATE_KEY, provider);
+            console.log('✅ Wallet initialized on-demand.');
+        } catch (initError) {
+            console.error('❌ FATAL: On-demand wallet init failed:', initError.message);
+            throw new Error('Backend wallet initialization failed on-demand');
+        }
+    }
+    // --- AKHIR TAMBAHAN ---
+
+    // Kode asli Anda
     if (!backendWallet) {
         throw new Error('Backend wallet not configured');
     }
@@ -215,7 +251,7 @@ async function executeUSDCTransfer(authorization, signature) {
 }
 
 // =================================================================
-// MINT NFT
+// MINT NFT (Modifikasi kecil)
 // =================================================================
 async function mintNFT(recipientAddress) {
     console.log('🎨 Minting NFT to:', recipientAddress);
@@ -226,8 +262,22 @@ async function mintNFT(recipientAddress) {
 
     try {
         const nftContract = new Contract(NFT_CONTRACT_ADDRESS, NFT_ABI, backendWallet);
+        
+        // --- TAMBAHAN: Cek jika provider gagal ---
+        let currentProvider = provider;
+        if (!currentProvider) {
+            console.warn('Provider not initialized. Retrying on-demand...');
+            try {
+                currentProvider = new JsonRpcProvider(FACILITATOR_CONFIG.cdpRpcUrl);
+                console.log('✅ Provider initialized on-demand.');
+            } catch (initError) {
+                console.error('❌ FATAL: On-demand provider init failed:', initError.message);
+                throw new Error('Provider initialization failed on-demand');
+            }
+        }
+        // --- AKHIR TAMBAHAN ---
 
-        const balance = await provider.getBalance(backendWallet.address);
+        const balance = await currentProvider.getBalance(backendWallet.address); // Menggunakan currentProvider
         console.log('⛽ Gas balance:', (Number(balance) / 1e18).toFixed(4), 'ETH');
 
         if (balance < BigInt(1e15)) {
@@ -290,7 +340,7 @@ async function mintNFT(recipientAddress) {
 }
 
 // =================================================================
-// NETLIFY HANDLER
+// NETLIFY HANDLER (Tidak ada perubahan)
 // =================================================================
 exports.handler = async (event) => {
     const headers = {
@@ -309,6 +359,7 @@ exports.handler = async (event) => {
 
     const xPaymentHeader = event.headers['x-payment'] || event.headers['X-Payment'];
 
+    // BLOK GET INI SEKARANG AMAN KARENA COLD START CRASH DICEGAH
     if (event.httpMethod === 'GET' || !xPaymentHeader) {
         const resource = `https://${event.headers.host}${event.path}`;
         
