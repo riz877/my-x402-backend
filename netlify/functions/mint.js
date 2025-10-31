@@ -101,15 +101,21 @@ function generateCoinbaseJWT() {
                 const keyObj = crypto.createPrivateKey({ key: CDP_PRIVATE_KEY, format: 'pem', type: 'pkcs8' });
                 privateKeyDerBuffer = keyObj.export({ format: 'der', type: 'pkcs8' });
             } catch (pemErr) {
-                throw new Error('Failed to parse PEM CDP_PRIVATE_KEY: ' + pemErr.message);
+                throw new Error('Failed to parse PEM CDP_PRIVATE_KEY: ' + pemErr.message + '. Make sure you pasted a PKCS#8 PEM (-----BEGIN PRIVATE KEY-----) not a raw 64-byte key.');
             }
         } else {
-            // Assume base64-encoded DER
+            // Assume base64-encoded DER (accept base64url too)
             try {
-                privateKeyDerBuffer = Buffer.from(CDP_PRIVATE_KEY, 'base64');
+                const normalized = CDP_PRIVATE_KEY.replace(/-/g, '+').replace(/_/g, '/');
+                privateKeyDerBuffer = Buffer.from(normalized, 'base64');
             } catch (b64Err) {
-                throw new Error('CDP_PRIVATE_KEY is not valid base64 or PEM');
+                throw new Error('CDP_PRIVATE_KEY is not valid base64 or PEM. If you supplied a raw 64-byte key, download the PEM from Coinbase and paste it (or convert to base64 DER).');
             }
+        }
+
+        // Sanity check: DER PKCS8 keys are significantly larger than raw 32/64-byte keys.
+        if (privateKeyDerBuffer.length === 32 || privateKeyDerBuffer.length === 64) {
+            throw new Error(`CDP_PRIVATE_KEY looks like a raw private key (${privateKeyDerBuffer.length} bytes). Coinbase requires a PKCS#8 PEM or base64 DER. Please provide the PEM or base64 DER.`);
         }
 
         const sign = crypto.createSign('SHA256');
@@ -200,7 +206,14 @@ async function reportToCoinbaseCDP(transactionData) {
 // EXECUTE USDC TRANSFER (Modified for env vars)
 // =================================================================
 async function executeUSDCTransfer(authorization, signature) {
-    const { from, to, value, validAfter, validBefore, nonce } = authorization;
+        // Coerce fields to predictable formats (strings)
+        let { from, to, value, validAfter, validBefore, nonce } = authorization;
+        from = String(from);
+        to = String(to);
+        value = String(value);
+        validAfter = String(validAfter ?? '0');
+        validBefore = String(validBefore ?? '0');
+        nonce = String(nonce);
 
     console.log('💸 Processing USDC transfer:', { from, to, value });
 
@@ -256,19 +269,45 @@ async function executeUSDCTransfer(authorization, signature) {
             console.warn('Warning: could not verify payer balance:', balErr.message);
         }
 
-        // Normalize signature: accept hex (0x..) or base64 string
+        // Normalize signature: accept hex (0x...), base64, or base64url.
         let sigHex = signature;
-        if (typeof sigHex === 'string' && !sigHex.startsWith('0x')) {
-            // try base64 -> hex
+
+        const tryDecodeToHex = (s) => {
+            if (!s) return null;
+            if (typeof s !== 'string') return null;
+            if (s.startsWith('0x')) return s;
+            // base64url -> base64
+            const base64url = s.replace(/-/g, '+').replace(/_/g, '/');
             try {
-                sigHex = '0x' + Buffer.from(sigHex, 'base64').toString('hex');
+                const buf = Buffer.from(base64url, 'base64');
+                return '0x' + buf.toString('hex');
             } catch (e) {
-                // fallback: leave as-is
+                return null;
             }
+        };
+
+        // If nonce is base64, convert to 0x hex bytes32 (server expects bytes32)
+        try {
+            if (!nonce.startsWith('0x') && /^[A-Za-z0-9\-_]+={0,2}$/.test(nonce)) {
+                // looks like base64/base64url
+                const b = Buffer.from(nonce.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+                if (b.length === 32) {
+                    nonce = '0x' + b.toString('hex');
+                }
+            }
+        } catch (e) {
+            // leave nonce as-is; minting/transfer will likely fail and return useful error
         }
 
+        // Build candidate signatures to try (hex and base64 variants)
+        const candidates = new Set();
+        const asHex = tryDecodeToHex(sigHex);
+        if (asHex) candidates.add(asHex);
+        // Also try raw signature if provided as hex without 0x
+        if (typeof sigHex === 'string' && /^[0-9a-fA-F]{130,132}$/.test(sigHex)) candidates.add('0x' + sigHex.replace(/^0x/, ''));
+        // try adding v variants later if needed
+
         // Verify EIP-712 signature server-side before attempting transfer.
-        // Try a few normalization variants for signatures (base64 vs hex, missing v byte, v as 0/1)
         try {
             const network = await provider.getNetwork();
             const chainId = network.chainId;
@@ -293,67 +332,87 @@ async function executeUSDCTransfer(authorization, signature) {
 
             const valueObj = { from, to, value, validAfter, validBefore, nonce };
 
-            // Build candidate signatures to try
-            const candidates = [];
-            if (typeof sigHex === 'string') candidates.push(sigHex);
-
-            // If signature is 65 bytes without v (130 hex chars), append v=0x1b/0x1c (27/28)
-            try {
-                const raw = sigHex.startsWith('0x') ? sigHex.slice(2) : sigHex;
-                if (raw.length === 130) {
-                    candidates.push('0x' + raw + '1b');
-                    candidates.push('0x' + raw + '1c');
-                }
-                // if v is 00/01, convert to 27/28
-                if (raw.length === 132) {
-                    const v = parseInt(raw.slice(-2), 16);
-                    if (v === 0 || v === 1) {
-                        const v27 = (v + 27).toString(16).padStart(2, '0');
-                        candidates.push('0x' + raw.slice(0, 130) + v27);
-                    }
-                }
-            } catch (e) {
-                // ignore
-            }
-
             let recovered = null;
-            let matchedCandidate = null;
+            let matched = null;
+
+            // Try all candidates first
             for (const c of candidates) {
                 try {
-                    recovered = await verifyTypedData(domain, types, valueObj, c);
-                    if (recovered) {
-                        matchedCandidate = c;
-                        break;
-                    }
+                    const r = await verifyTypedData(domain, types, valueObj, c);
+                    if (r) { recovered = r; matched = c; break; }
                 } catch (e) {
-                    // try next candidate
+                    // continue
+                }
+            }
+
+            // If not recovered yet, try adding v byte guesses for 65-byte signatures (130 hex chars)
+            if (!recovered) {
+                for (const c of Array.from(candidates)) {
+                    const raw = c.startsWith('0x') ? c.slice(2) : c;
+                    if (raw.length === 130) {
+                        const cand27 = '0x' + raw + '1b';
+                        const cand28 = '0x' + raw + '1c';
+                        for (const cc of [cand27, cand28]) {
+                            try {
+                                const r = await verifyTypedData(domain, types, valueObj, cc);
+                                if (r) { recovered = r; matched = cc; break; }
+                            } catch (e) {}
+                        }
+                        if (recovered) break;
+                    }
+                    // handle v as 00/01 -> convert to 27/28
+                    if (raw.length === 132) {
+                        try {
+                            const v = parseInt(raw.slice(-2), 16);
+                            if (v === 0 || v === 1) {
+                                const v27 = (v + 27).toString(16).padStart(2, '0');
+                                const cand = '0x' + raw.slice(0, 130) + v27;
+                                const r = await verifyTypedData(domain, types, valueObj, cand);
+                                if (r) { recovered = r; matched = cand; break; }
+                            }
+                        } catch (e) {}
+                    }
                 }
             }
 
             if (!recovered) {
-                // final attempt: try using original sigHex as-is once more to get a specific error
-                try {
-                    await verifyTypedData(domain, types, valueObj, sigHex);
-                } catch (finalErr) {
-                    // surface friendly message
-                    throw new Error('Payment failed: invalid signature (client signature did not match payer address)');
-                }
+                console.error('Signature verification failed for payload', JSON.stringify(valueObj));
+                throw new Error('Payment failed: invalid signature (client signature did not match payer address)');
             }
 
-            console.log('🔎 Signature recovered address:', recovered, 'candidateUsed:', matchedCandidate ? matchedCandidate.slice(0, 10) + '...' : 'original');
+            console.log('🔎 Signature recovered address:', recovered, 'candidateUsed:', matched ? matched.slice(0, 10) + '...' : 'original');
             if (recovered.toLowerCase() !== from.toLowerCase()) {
-                const err = new Error(`Payment failed: invalid signature (recovered ${recovered} != expected ${from})`);
-                err.original = new Error('FiatTokenV2: invalid signature');
-                throw err;
+                throw new Error(`Payment failed: invalid signature (recovered ${recovered} != expected ${from})`);
             }
+
+            // Use the successful matched signature (hex) for on-chain call
+            if (matched) sigHex = matched;
         } catch (verr) {
-            // Provide a friendly error message for signature problems
             console.error('Signature verification failed:', verr.message);
             throw new Error('Payment failed: invalid signature (client signature did not match payer address)');
         }
 
-        const sig = Signature.from(sigHex);
-        const { v, r, s } = sig;
+        // Parse signature into v/r/s
+        let v, r, s;
+        try {
+            const sigParsed = Signature.from(sigHex);
+            ({ v, r, s } = sigParsed);
+        } catch (sigErr) {
+            // try to parse from buffer hex manually
+            try {
+                const raw = sigHex.startsWith('0x') ? sigHex.slice(2) : sigHex;
+                const buf = Buffer.from(raw, 'hex');
+                if (buf.length === 65) {
+                    r = '0x' + buf.slice(0, 32).toString('hex');
+                    s = '0x' + buf.slice(32, 64).toString('hex');
+                    v = buf[64];
+                } else {
+                    throw sigErr;
+                }
+            } catch (finalErr) {
+                throw new Error('Payment failed: could not parse client signature');
+            }
+        }
 
         let tx;
         try {
