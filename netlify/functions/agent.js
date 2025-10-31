@@ -7,9 +7,27 @@ const {
   NFT_CONTRACT_ADDRESS
 } = process.env;
 
-// Setup provider dan wallet relayer (pembayar gas)
-const provider = new JsonRpcProvider(PROVIDER_URL);
-const relayerWallet = new Wallet(RELAYER_PRIVATE_KEY, provider);
+// Guarded provider and relayer wallet initialization so module import
+// doesn't throw when env vars are missing or invalid (helps GET checks).
+let provider;
+let relayerWallet;
+try {
+  provider = new JsonRpcProvider(PROVIDER_URL);
+} catch (e) {
+  console.warn('agent.js: provider initialization warning:', e.message);
+  provider = null;
+}
+
+if (RELAYER_PRIVATE_KEY) {
+  try {
+    relayerWallet = new Wallet(RELAYER_PRIVATE_KEY, provider);
+  } catch (e) {
+    console.warn('agent.js: RELAYER_PRIVATE_KEY invalid or provider missing:', e.message);
+    relayerWallet = null;
+  }
+} else {
+  relayerWallet = null;
+}
 
 // ABI kontrak yang dibutuhkan
 const usdcAbi = [

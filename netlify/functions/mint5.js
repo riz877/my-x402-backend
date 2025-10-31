@@ -1,6 +1,6 @@
 const { JsonRpcProvider, Wallet, Contract, Signature } = require('ethers');
 
-// --- CONFIGURATION (DIUBAH) ---
+// --- KONFIGURASI (DIUBAH) ---
 const NFT_CONTRACT_ADDRESS = "0x03657531f55ab9b03f5aef07d1af79c070e50366";
 const PAYMENT_RECIPIENT = "0x2e6e06f71786955474d35293b09a3527debbbfce";
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
@@ -9,12 +9,26 @@ const MINT_AMOUNT = 5; // 5 NFT
 // --- AKHIR PERUBAHAN ---
 
 const { PROVIDER_URL, RELAYER_PRIVATE_KEY } = process.env;
-const provider = new JsonRpcProvider(PROVIDER_URL || "https://mainnet.base.org");
 
-// Backend wallet
+// Guarded provider and backend wallet initialization
+let provider;
 let backendWallet;
+try {
+    provider = new JsonRpcProvider(PROVIDER_URL || "https://mainnet.base.org");
+} catch (e) {
+    console.warn('mint5.js: provider initialization warning:', e.message);
+    provider = null;
+}
+
 if (RELAYER_PRIVATE_KEY) {
-    backendWallet = new Wallet(RELAYER_PRIVATE_KEY, provider);
+    try {
+        backendWallet = new Wallet(RELAYER_PRIVATE_KEY, provider);
+    } catch (e) {
+        console.warn('mint5.js: RELAYER_PRIVATE_KEY invalid or provider missing:', e.message);
+        backendWallet = null;
+    }
+} else {
+    backendWallet = null;
 }
 
 // ABIs

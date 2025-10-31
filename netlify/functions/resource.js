@@ -6,8 +6,28 @@ const PAYMENT_ADDRESS = "0x2e6e06f71786955474d35293b09a3527debbbfce";
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const MINT_PRICE = "1000000"; // 2 USDC
 
-const provider = new JsonRpcProvider(process.env.PROVIDER_URL || "https://mainnet.base.org");
-const wallet = new Wallet(process.env.RELAYER_PRIVATE_KEY, provider);
+// Lazy/guarded initialization for provider and wallet so GET requests
+// that only return a 402 don't crash during module import if env vars
+// are missing or the private key is invalid.
+let provider;
+let wallet;
+try {
+    provider = new JsonRpcProvider(process.env.PROVIDER_URL || "https://mainnet.base.org");
+} catch (e) {
+    console.warn('Warning: provider initialization failed:', e.message);
+    provider = null;
+}
+
+if (process.env.RELAYER_PRIVATE_KEY) {
+    try {
+        wallet = new Wallet(process.env.RELAYER_PRIVATE_KEY, provider);
+    } catch (e) {
+        console.warn('Warning: RELAYER_PRIVATE_KEY invalid or provider missing:', e.message);
+        wallet = null;
+    }
+} else {
+    wallet = null;
+}
 
 const NFT_ABI = [
     "function mint(address _to, uint256 _mintAmount) external"
@@ -38,7 +58,10 @@ exports.handler = async (event) => {
     }
 
     const xPayment = event.headers['x-payment'] || event.headers['X-Payment'];
-    const resourceUrl = `https://${event.headers.host}${event.path}`;
+    // event.path can be undefined when invoking the handler locally; prefer
+    // event.path -> event.rawPath -> fallback to '/'
+    const requestedPath = event.path || event.rawPath || '/';
+    const resourceUrl = `https://${event.headers.host}${requestedPath}`;
 
     // Return 402 Payment Required
     if (!xPayment) {

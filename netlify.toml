@@ -5,3 +5,39 @@
     Access-Control-Allow-Origin = "*"
     Access-Control-Allow-Headers = "Content-Type, X-Payment"
     Access-Control-Allow-Methods = "GET, POST, OPTIONS"
+
+[[redirects]]
+  from = "/resource"
+  to = "/.netlify/functions/resource"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/mint"
+  to = "/.netlify/functions/mint"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/mint_hood"
+  to = "/.netlify/functions/mint_hood"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/mint5"
+  to = "/.netlify/functions/mint5"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/lucky"
+  to = "/.netlify/functions/lucky"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/agent"
+  to = "/.netlify/functions/agent"
+  status = 200
+  force = true

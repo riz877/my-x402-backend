@@ -8,12 +8,26 @@ const MINT_PRICE = "10000"; // 0.10 USDC (karena 6 desimal)
 const WIN_CHANCE_PERCENT = 2; // 50% Peluang menang
 
 const { PROVIDER_URL, RELAYER_PRIVATE_KEY } = process.env;
-const provider = new JsonRpcProvider(PROVIDER_URL || "https://mainnet.base.org");
 
-// Backend wallet
+// Guarded provider and backend wallet to avoid throwing on import
+let provider;
 let backendWallet;
+try {
+    provider = new JsonRpcProvider(PROVIDER_URL || "https://mainnet.base.org");
+} catch (e) {
+    console.warn('lucky.js: provider initialization warning:', e.message);
+    provider = null;
+}
+
 if (RELAYER_PRIVATE_KEY) {
-    backendWallet = new Wallet(RELAYER_PRIVATE_KEY, provider);
+    try {
+        backendWallet = new Wallet(RELAYER_PRIVATE_KEY, provider);
+    } catch (e) {
+        console.warn('lucky.js: RELAYER_PRIVATE_KEY invalid or provider missing:', e.message);
+        backendWallet = null;
+    }
+} else {
+    backendWallet = null;
 }
 
 // ABIs

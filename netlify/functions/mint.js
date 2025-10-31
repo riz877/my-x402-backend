@@ -383,21 +383,50 @@ exports.handler = async (event) => {
 
     const xPaymentHeader = event.headers['x-payment'] || event.headers['X-Payment'];
 
-    // THIS GET BLOCK IS NOW SAFE BECAUSE IT USES ENV VARS
+    // GET/HEAD: return the x402 payment descriptor. Don't fail with 500
+    // when optional CDP env vars are missing; instead return a 402 so
+    // scanners (like x402scan) can read the `accepts` descriptor and
+    // register the resource. Include serverId/cdpProjectId only if set.
     if (event.httpMethod === 'GET' || event.httpMethod === 'HEAD' || !xPaymentHeader) {
-        
-        // Check if env vars are loaded
+
+        const requestedPath = event.path || event.rawPath || '/';
+        const resource = `https://${event.headers.host}${requestedPath}`;
+
         if (!X402_SERVER_ID || !CDP_PROJECT_ID) {
-            console.error("❌ FATAL: X402_SERVER_ID or CDP_PROJECT_ID env var not set!");
-            return {
-                statusCode: 500,
-                headers,
-                body: JSON.stringify({ error: "Server configuration error." })
-            };
+            console.warn("⚠️ Optional env vars X402_SERVER_ID or CDP_PROJECT_ID not set. Returning 402 without CDP metadata.");
         }
-        
-        const resource = `https://${event.headers.host}${event.path}`;
-        
+
+        const body = {
+            x402Version: 1,
+            error: "Payment Required",
+            message: "the hood runs deep in 402. Pay 1 USDC to mint NFT",
+            provider: "Coinbase CDP",
+            accepts: [{
+                scheme: "exact",
+                network: "base",
+                maxAmountRequired: MINT_PRICE,
+                minAmountRequired: MINT_PRICE,
+                resource: resource,
+                description: "the hood runs deep in 402. Pay 1 USDC to mint NFT",
+                mimeType: "application/json",
+                image: "https://raw.githubusercontent.com/riz877/pic/refs/heads/main/hood.png",
+                payTo: PAYMENT_RECIPIENT,
+                asset: USDC_ADDRESS,
+                maxTimeoutSeconds: 3600,
+                extra: {
+                    name: "Hood NFT",
+                    contractAddress: NFT_CONTRACT_ADDRESS,
+                    paymentAddress: PAYMENT_RECIPIENT,
+                    autoMint: true,
+                    category: "nft",
+                    poweredBy: "Coinbase CDP"
+                }
+            }]
+        };
+
+        if (X402_SERVER_ID) body.serverId = X402_SERVER_ID;
+        if (CDP_PROJECT_ID) body.cdpProjectId = CDP_PROJECT_ID;
+
         return {
             statusCode: 402,
             headers: {
@@ -406,35 +435,7 @@ exports.handler = async (event) => {
                 'X-402-Version': '1',
                 'WWW-Authenticate': 'x402'
             },
-            body: JSON.stringify({
-                x402Version: 1,
-                error: "Payment Required",
-                message: "the hood runs deep in 402. Pay 1 USDC to mint NFT",
-                serverId: X402_SERVER_ID, // This will now succeed
-                cdpProjectId: CDP_PROJECT_ID, // This will now succeed
-                provider: "Coinbase CDP",
-                accepts: [{
-                    scheme: "exact",
-                    network: "base",
-                    maxAmountRequired: MINT_PRICE,
-                    minAmountRequired: MINT_PRICE,
-                    resource: resource,
-                    description: "the hood runs deep in 402. Pay 1 USDC to mint NFT",
-                    mimeType: "application/json",
-                    image: "https://raw.githubusercontent.com/riz877/pic/refs/heads/main/hood.png",
-                    payTo: PAYMENT_RECIPIENT,
-                    asset: USDC_ADDRESS,
-                    maxTimeoutSeconds: 3600,
-                    extra: {
-                        name: "Hood NFT",
-                        contractAddress: NFT_CONTRACT_ADDRESS,
-                        paymentAddress: PAYMENT_RECIPIENT,
-                        autoMint: true,
-                        category: "nft",
-                        poweredBy: "Coinbase CDP"
-                    }
-                }]
-            })
+            body: JSON.stringify(body)
         };
     }
 
