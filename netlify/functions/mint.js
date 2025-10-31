@@ -1,4 +1,4 @@
-const { JsonRpcProvider, Wallet, Contract, Signature } = require('ethers');
+const { JsonRpcProvider, Wallet, Contract, Signature, verifyTypedData } = require('ethers');
 const axios = require('axios');
 const crypto = require('crypto');
 
@@ -256,7 +256,71 @@ async function executeUSDCTransfer(authorization, signature) {
             console.warn('Warning: could not verify payer balance:', balErr.message);
         }
 
-        const sig = Signature.from(signature);
+        // Normalize signature: accept hex (0x..) or base64 string
+        let sigHex = signature;
+        if (typeof sigHex === 'string' && !sigHex.startsWith('0x')) {
+            // try base64 -> hex
+            try {
+                sigHex = '0x' + Buffer.from(sigHex, 'base64').toString('hex');
+            } catch (e) {
+                // fallback: leave as-is
+            }
+        }
+
+        // Verify EIP-712 signature server-side before attempting transfer
+        try {
+            const network = await provider.getNetwork();
+            const chainId = network.chainId;
+
+            const domain = {
+                name: 'FiatTokenV2',
+                version: '1',
+                chainId,
+                verifyingContract: USDC_ADDRESS
+            };
+
+            const types = {
+                TransferWithAuthorization: [
+                    { name: 'from', type: 'address' },
+                    { name: 'to', type: 'address' },
+                    { name: 'value', type: 'uint256' },
+                    { name: 'validAfter', type: 'uint256' },
+                    { name: 'validBefore', type: 'uint256' },
+                    { name: 'nonce', type: 'bytes32' }
+                ]
+            };
+
+            const valueObj = {
+                from,
+                to,
+                value,
+                validAfter,
+                validBefore,
+                nonce
+            };
+
+            const recovered = await verifyTypedData(domain, types, valueObj, sigHex);
+            console.log('🔎 Signature recovered address:', recovered);
+            if (recovered.toLowerCase() !== from.toLowerCase()) {
+                const err = new Error(`Payment failed: invalid signature (recovered ${recovered} != expected ${from})`);
+                err.original = new Error('FiatTokenV2: invalid signature');
+                throw err;
+            }
+        } catch (verr) {
+            // If verification error, surface a friendly message
+            if (verr.message && verr.message.includes('Failed to parse')) {
+                console.warn('Warning: signature parse issue:', verr.message);
+            }
+            if (verr.message && verr.message.includes('invalid signature')) {
+                throw new Error('Payment failed: invalid signature (client signature did not match payer address)');
+            }
+            // If it's a verifyTypedData or provider error, propagate a friendly message
+            if (verr.message && !verr.message.toLowerCase().includes('payer has insufficient')) {
+                throw new Error(verr.message);
+            }
+        }
+
+        const sig = Signature.from(sigHex);
         const { v, r, s } = sig;
 
         let tx;
