@@ -1,210 +1,166 @@
-// === SECTION 1: IMPORTS ===
-// Using 'import' (ES Module). Ensure your package.json has "type": "module"
-import express from 'express';
-import { ethers } from 'ethers';
-import { facilitator } from '@coinbase/x402'; // This is the Coinbase Facilitator
-import { paymentMiddleware } from 'x402-express'; // This is the Coinbase Middleware
+// Menggunakan 'require' (CommonJS) karena ini di Netlify Functions
+const express = require('express');
+const serverless = require('serverless-http'); // <-- PENTING
+const { ethers, Contract, Wallet, Signature } = require('ethers');
+const { facilitator } = require('@coinbase/x402'); // <-- Facilitator Coinbase
+const { paymentMiddleware } = require('x402-express'); // <-- Middleware Coinbase
 
-// === SECTION 2: CONFIGURATION & VARIABLES ===
+// === BAGIAN 1: KONFIGURASI & SEMUA 4 KUNCI ===
 
-// --- Load Environment Variables ---
-// Coinbase API Keys & MINTING Relayer Key
+// Ambil SEMUA 4 KUNCI dari Environment Variables Netlify
 const {
+  // Kunci API Coinbase (dari file cdp_api_key.json)
   CDP_API_KEY_ID,
   CDP_API_KEY_SECRET,
+  
+  // Kunci Relayer Anda (dari setup mint.js lama)
   RELAYER_PRIVATE_KEY,
-  PROVIDER_URL,
+  PROVIDER_URL
 } = process.env;
 
-// Check for essential variables
+// Cek Kunci Coinbase
 if (!CDP_API_KEY_ID || !CDP_API_KEY_SECRET) {
-  console.warn(
-    'WARNING: CDP API Keys are not set. Coinbase facilitator will not function.'
-  );
+  console.warn('PERINGATAN: Kunci API CDP Coinbase tidak diatur. Fasilitator tidak akan terdaftar di Bazaar.');
+  // (Anda bisa mengatur ini di Environment Variables Netlify)
 }
+
+// Cek Kunci Relayer
 if (!RELAYER_PRIVATE_KEY || !PROVIDER_URL) {
-  console.error(
-    'FATAL ERROR: RELAYER_PRIVATE_KEY or PROVIDER_URL is not set. Minting will fail.'
-  );
+    console.error('ERROR FATAL: RELAYER_PRIVATE_KEY atau PROVIDER_URL tidak diatur. Minting akan gagal.');
+    // (Ini juga harus diatur di Netlify)
 }
 
-// --- Constants (from mint.js) ---
-const NFT_CONTRACT_ADDRESS = '0xaa1b03eea35b55d8c15187fe8f57255d4c179113';
-const PAYMENT_RECIPIENT = '0xD95A8764AA0dD4018971DE4Bc2adC09193b8A3c2';
-const MINT_PRICE_USD = '2.00'; // Coinbase middleware requires dollar string format
+// Konstanta
+const NFT_CONTRACT_ADDRESS = "0xaa1b03eea35b55d8c15187fe8f57255d4c179113";
+const PAYMENT_RECIPIENT = "0xD95A8764AA0dD4018971DE4Bc2adC09193b8A3c2";
+const MINT_PRICE_USD = "2.00"; // Coinbase perlu format string dolar
 
-// === SECTION 3: MINTING LOGIC (from mint.js) ===
+const provider = new ethers.JsonRpcProvider(PROVIDER_URL || "https://mainnet.base.org");
 
-// Setup Ethers for the relayer wallet
-const provider = new ethers.JsonRpcProvider(PROVIDER_URL);
-const backendWallet = new ethers.Wallet(RELAYER_PRIVATE_KEY, provider);
-
-// Your NFT Contract ABI
+// ABIs
 const NFT_ABI = [
-  'function mint(address to, uint256 amount) public',
-  'function totalSupply() public view returns (uint256)',
-  'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
+    'function mint(address to, uint256 amount) public',
+    'function totalSupply() public view returns (uint256)',
+    'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)'
 ];
+const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 
-// 'Transfer' Event Topic for finding Token ID
-const TRANSFER_TOPIC =
-  '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+// === BAGIAN 2: LOGIKA MINTING (Lazy-loaded) ===
 
-/**
- * This is your custom mintNFT function.
- * This function is called AFTER Coinbase verifies the payment.
- */
+let _cachedBackendWallet = null;
+
+function getBackendWallet() {
+    if (_cachedBackendWallet) return _cachedBackendWallet;
+    if (!RELAYER_PRIVATE_KEY) throw new Error("RELAYER_PRIVATE_KEY tidak diatur");
+    try {
+        _cachedBackendWallet = new Wallet(RELAYER_PRIVATE_KEY, provider);
+        console.log("Dompet Relayer (Minting) diinisialisasi, alamat:", _cachedBackendWallet.address);
+        return _cachedBackendWallet;
+    } catch (e) {
+        console.error("Gagal inisialisasi dompet relayer:", e.message);
+        throw new Error("RELAYER_PRIVATE_KEY tidak valid");
+    }
+}
+
 async function mintNFT(recipientAddress) {
   try {
-    console.log(`[Mint Logic] Starting NFT mint to: ${recipientAddress}`);
+    console.log(`[Mint Logic] Memulai minting NFT ke: ${recipientAddress}`);
+    const backendWallet = getBackendWallet();
+    const nftContract = new Contract(NFT_CONTRACT_ADDRESS, NFT_ABI, backendWallet);
 
-    if (!backendWallet) {
-      throw new Error('Backend wallet (Relayer) is not configured');
-    }
-
-    const nftContract = new ethers.Contract(
-      NFT_CONTRACT_ADDRESS,
-      NFT_ABI,
-      backendWallet
-    );
-
-    // Check relayer gas balance
     const balance = await provider.getBalance(backendWallet.address);
-    console.log(
-      `[Mint Logic] Relayer wallet balance: ${(
-        Number(balance) / 1e18
-      ).toFixed(5)} ETH`
-    );
-    if (balance < BigInt(1e15)) {
-      // 0.001 ETH
-      throw new Error('Insufficient gas in relayer wallet. Minting aborted.');
+    console.log(`[Mint Logic] Saldo Relayer: ${(Number(balance) / 1e18).toFixed(4)} ETH`);
+    if (balance < BigInt(1e15)) { // 0.001 ETH
+        throw new Error('Gas di dompet relayer tidak mencukupi');
     }
 
-    // Calling the mint function on your contract
-    console.log('[Mint Logic] Calling contract.mint() function...');
-    const tx = await nftContract.mint(recipientAddress, 1, {
-      gasLimit: 200000, // Set a reasonable gas limit
-    });
-
-    console.log(`[Mint Logic] Mint transaction sent: ${tx.hash}`);
+    console.log('[Mint Logic] Memanggil contract.mint()...');
+    const tx = await nftContract.mint(recipientAddress, 1, { gasLimit: 200000 });
     const receipt = await tx.wait();
-    console.log(`[Mint Logic] Mint confirmed in block: ${receipt.blockNumber}`);
+    console.log(`[Mint Logic] Minting dikonfirmasi: ${receipt.hash}`);
 
-    // Extract Token ID from 'Transfer' event
     let tokenId = 'unknown';
     for (const log of receipt.logs) {
-      if (
-        log.address.toLowerCase() === NFT_CONTRACT_ADDRESS.toLowerCase() &&
-        log.topics[0] === TRANSFER_TOPIC
-      ) {
-        const from = '0x' + log.topics[1].substring(26);
-        // Check if 'from' is the ZERO address (new mint)
-        if (from === '0x0000000000000000000000000000000000000000') {
-          tokenId = BigInt(log.topics[3]).toString();
-          break;
+        if (log.address.toLowerCase() === NFT_CONTRACT_ADDRESS.toLowerCase() && log.topics[0] === TRANSFER_TOPIC) {
+            const from = '0x' + log.topics[1].substring(26);
+            if (from === '0x0000000000000000000000000000000000000000') {
+                tokenId = BigInt(log.topics[3]).toString();
+                break;
+            }
         }
-      }
     }
-    console.log(`[Mint Logic] Obtained Token ID: ${tokenId}`);
-
-    return {
-      success: true,
-      tokenId,
-      txHash: receipt.hash,
-      blockNumber: receipt.blockNumber,
-    };
+    console.log(`[Mint Logic] Token ID didapat: ${tokenId}`);
+    return { success: true, tokenId, txHash: receipt.hash };
   } catch (error) {
-    console.error('[Mint Logic] Error during minting:', error.message);
-    throw error; // Let the main handler catch this error
+    console.error('[Mint Logic] Error saat minting:', error.message);
+    throw error;
   }
 }
 
-// === SECTION 4: EXPRESS SERVER (COMBINING) ===
+// === BAGIAN 3: SERVER EXPRESS ===
 
-// Initialize Express server
 const app = express();
 app.use(express.json());
 
-// --- A. Coinbase Facilitator Middleware ---
-// This is your "API Facilitator".
-// It will protect the endpoint below and register you with the X402 Bazaar.
+// --- A. Middleware Facilitator Coinbase ---
+// Ini adalah "API Facilitator" Anda.
+// Ini akan melindungi endpoint di bawahnya dan mendaftarkan Anda ke X402 Bazaar.
+// Middleware ini akan menangani GET (mengirim 402) dan POST (memverifikasi X-Payment).
+//
+// CATATAN: URL path ('/') relatif terhadap URL fungsi,
+// jadi ini akan melindungi '.../functions/mint'
 app.use(
+  '/', // Melindungi root dari fungsi ini
   paymentMiddleware(
-    PAYMENT_RECIPIENT, // Your receiving wallet for USDC payments
+    PAYMENT_RECIPIENT,
     {
-      // Define which endpoints are protected and their price
-      'POST /api/mint': {
+      // Tentukan endpoint mana yang dilindungi
+      // 'POST /' berarti metode POST ke '.../functions/mint'
+      'POST /': {
         price: `$${MINT_PRICE_USD}`,
         network: 'base',
-        // Metadata for X402 Bazaar (from mint.js)
         config: {
           description: 'the hood runs deep in 402. Pay 2 USDC to mint NFT',
-          image:
-            'https://raw.githubusercontent.com/riz877/pic/refs/heads/main/hood.png',
+          image: 'https://raw.githubusercontent.com/riz877/pic/refs/heads/main/hood.png',
         },
       },
-      // You can add other endpoints here
-      // "GET /api/status": { price: "$0.01", network: "base" }
     },
-    facilitator // This is the official Coinbase facilitator
+    facilitator // Menggunakan fasilitator resmi Coinbase
   )
 );
 
-// --- B. Your Custom Route Handler (Minting Logic) ---
-// This code will ONLY run IF the `paymentMiddleware` above SUCCEEDS
-// in verifying the payment.
-app.post('/api/mint', async (req, res) => {
+// --- B. Route Handler Kustom Anda (Logika Minting) ---
+// Kode ini HANYA akan berjalan JIKA `paymentMiddleware` di atas SUKSES
+// memverifikasi pembayaran.
+app.post('/', async (req, res) => {
   try {
-    // The Coinbase middleware automatically provides the payer's address
-    const userAddress = req.x402?.from;
-
+    const userAddress = req.x402?.from; // Alamat pembayar dari middleware
     if (!userAddress) {
-      console.error(
-        '[Route Handler] Payment verified, but `req.x402.from` was not found!'
-      );
-      return res
-        .status(400)
-        .json({ error: 'User address not found after payment.' });
+      console.error('[Route Handler] Pembayaran terverifikasi, tetapi `req.x402.from` tidak ditemukan!');
+      return res.status(400).json({ error: 'Alamat pengguna tidak ditemukan setelah pembayaran.' });
     }
 
-    console.log(
-      `[Route Handler] Payment via Coinbase verified from: ${userAddress}.`
-    );
-    console.log('[Route Handler] Starting custom minting process...');
+    console.log(`[Route Handler] Pembayaran via Coinbase terverifikasi dari: ${userAddress}.`);
+    console.log('[Route Handler] Memulai proses minting kustom...');
 
-    // Call your custom minting function
     const mintResult = await mintNFT(userAddress);
 
-    console.log(
-      `[Route Handler] SUCCESS: Token #${mintResult.tokenId} was minted for ${userAddress}`
-    );
-
-    // Send a 200 OK success response
+    console.log(`[Route Handler] SUKSES: Token #${mintResult.tokenId} dicetak untuk ${userAddress}`);
     res.status(200).json({
       success: true,
       message: 'Payment received (via Coinbase) and NFT minted!',
       data: {
         tokenId: mintResult.tokenId,
-        nftContract: NFT_CONTRACT_ADDRESS,
-        recipient: userAddress,
         mintTx: mintResult.txHash,
-        blockNumber: mintResult.blockNumber,
-        // (You can add paymentTx if available from req.x402)
       },
     });
+
   } catch (error) {
-    console.error(
-      '[Route Handler] Error after payment verification:',
-      error.message
-    );
-    // Send error response to the client
-    res.status(500).json({
-      success: false,
-      error: `Minting failed after payment: ${error.message}`,
-    });
+    console.error('[Route Handler] Error setelah pembayaran diverifikasi:', error.message);
+    res.status(5.03).json({ success: false, error: `Minting failed after payment: ${error.message}` });
   }
 });
 
-// === SECTION 5: EXPORT FOR VERCEL ===
-// This code will be exported as a serverless function
-export default app;
+// === BAGIAN 4: EXPORT HANDLER UNTUK NETLIFY ===
+// Bungkus aplikasi Express agar bisa dijalankan oleh Netlify
+exports.handler = serverless(app);
