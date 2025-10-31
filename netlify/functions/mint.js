@@ -1,6 +1,7 @@
 const { JsonRpcProvider, Wallet, Contract, Signature, verifyTypedData } = require('ethers');
 const axios = require('axios');
 const crypto = require('crypto');
+const { facilitator } = require("@coinbase/x402"); // <-- INI YANG DIPERBAIKI
 
 // --- NO LONGER 'require' FOR CONFIG ---
 // We will use process.env directly
