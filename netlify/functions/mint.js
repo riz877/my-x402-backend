@@ -1,9 +1,9 @@
 const { JsonRpcProvider, Wallet, Contract, Signature } = require('ethers');
 const axios = require('axios');
 const crypto = require('crypto');
-// --- PERUBAHAN UTAMA DI SINI ---
-// Path diubah, dengan asumsi 'facilitator-config.js' ada di folder yang sama
-const FACILITATOR_CONFIG = require('./facilitator-config');
+
+// --- TIDAK ADA LAGI 'require' UNTUK CONFIG ---
+// Kita akan menggunakan process.env langsung
 
 // --- KONFIGURASI LAIN ---
 const NFT_CONTRACT_ADDRESS = "0x03657531f55ab9b03f5aef07d1af79c070e50366";
@@ -11,15 +11,28 @@ const PAYMENT_RECIPIENT = "0x2e6e06f71786955474d35293b09a3527debbbfce";
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const MINT_PRICE = "1000000"; // 1 USDC
 
-const { RELAYER_PRIVATE_KEY } = process.env;
+// Ambil variabel dari Environment Netlify
+const { 
+    RELAYER_PRIVATE_KEY,
+    CDP_RPC_URL,
+    CDP_API_KEY_ID,
+    CDP_PRIVATE_KEY,
+    CDP_API_URL,
+    CDP_PROJECT_ID,
+    X402_SERVER_ID
+} = process.env;
 
-// --- PERBAIKAN COLD START (Sudah bagus, tidak diubah) ---
+
+// --- PERBAIKAN COLD START (Sudah bagus, dimodifikasi untuk env vars) ---
 let provider;
 let backendWallet;
 
 try {
-    // Kode asli Anda tetap di sini, di dalam try...catch
-    provider = new JsonRpcProvider(FACILITATOR_CONFIG.cdpRpcUrl);
+    // Menggunakan CDP_RPC_URL dari process.env
+    if (!CDP_RPC_URL) {
+        throw new Error("CDP_RPC_URL environment variable not set");
+    }
+    provider = new JsonRpcProvider(CDP_RPC_URL);
     
     if (RELAYER_PRIVATE_KEY) {
         backendWallet = new Wallet(RELAYER_PRIVATE_KEY, provider);
@@ -28,12 +41,11 @@ try {
         console.warn('⚠️ RELAYER_PRIVATE_KEY not set on cold start.');
     }
 } catch (error) {
-    // Ini adalah TAMBAHAN untuk mencegah crash saat GET
     console.error(`🔥 COLD START ERROR: ${error.message}. Wallet init will retry on POST.`);
-    provider = null; // Set ke null agar bisa dicoba lagi nanti
+    provider = null; 
     backendWallet = null;
 }
-// --- PERBAIKAN COLD START SELESAI ---
+// --- PERBAIKAN COLD START SEKIRA ---
 
 
 // ABIs (Tidak ada perubahan)
@@ -52,19 +64,23 @@ const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a
 const processedAuthorizations = new Set();
 
 // =================================================================
-// GENERATE COINBASE CDP JWT TOKEN (Tidak ada perubahan)
+// GENERATE COINBASE CDP JWT TOKEN (Dimodifikasi untuk env vars)
 // =================================================================
 function generateCoinbaseJWT() {
     try {
+        if (!CDP_API_KEY_ID || !CDP_PRIVATE_KEY) {
+            throw new Error("Missing CDP_API_KEY_ID or CDP_PRIVATE_KEY");
+        }
+        
         const header = {
             alg: 'ES256',
             typ: 'JWT',
-            kid: FACILITATOR_CONFIG.cdpApiKeyId
+            kid: CDP_API_KEY_ID // Dari env
         };
 
         const now = Math.floor(Date.now() / 1000);
         const payload = {
-            sub: FACILITATOR_CONFIG.cdpApiKeyId,
+            sub: CDP_API_KEY_ID, // Dari env
             iss: 'coinbase-cloud',
             aud: ['api.developer.coinbase.com'],
             nbf: now,
@@ -76,7 +92,7 @@ function generateCoinbaseJWT() {
         const encodedPayload = Buffer.from(JSON.stringify(payload)).toString('base64url');
         const message = `${encodedHeader}.${encodedPayload}`;
 
-        const privateKeyBuffer = Buffer.from(FACILITATOR_CONFIG.cdpPrivateKey, 'base64');
+        const privateKeyBuffer = Buffer.from(CDP_PRIVATE_KEY, 'base64'); // Dari env
         
         const sign = crypto.createSign('SHA256');
         sign.update(message);
@@ -96,11 +112,15 @@ function generateCoinbaseJWT() {
 }
 
 // =================================================================
-// REPORT TO COINBASE CDP (Tidak ada perubahan)
+// REPORT TO COINBASE CDP (Dimodifikasi untuk env vars)
 // =================================================================
 async function reportToCoinbaseCDP(transactionData) {
     try {
         console.log('📡 Reporting to Coinbase CDP...');
+        
+        if (!CDP_API_URL || !CDP_PROJECT_ID) {
+            throw new Error("Missing CDP_API_URL or CDP_PROJECT_ID");
+        }
         
         const jwt = generateCoinbaseJWT();
         if (!jwt) {
@@ -108,7 +128,7 @@ async function reportToCoinbaseCDP(transactionData) {
             return { success: false, error: 'JWT generation failed' };
         }
 
-        const endpoint = `${FACILITATOR_CONFIG.cdpApiUrl}/v1/projects/${FACILITATOR_CONFIG.cdpProjectId}/events`;
+        const endpoint = `${CDP_API_URL}/v1/projects/${CDP_PROJECT_ID}/events`; // Dari env
         
         const payload = {
             event_name: 'x402_transaction',
@@ -116,6 +136,7 @@ async function reportToCoinbaseCDP(transactionData) {
             network: 'base',
             timestamp: new Date().toISOString(),
             properties: {
+                // ... (properti lainnya)
                 transaction_hash: transactionData.txHash || 'pending',
                 status: transactionData.status,
                 from_address: transactionData.from,
@@ -129,7 +150,7 @@ async function reportToCoinbaseCDP(transactionData) {
                 payment_tx: transactionData.paymentTx || null,
                 mint_tx: transactionData.mintTx || null,
                 error_message: transactionData.error || null,
-                x402_server_id: FACILITATOR_CONFIG.x402ServerId
+                x402_server_id: X402_SERVER_ID // Dari env
             }
         };
 
@@ -137,7 +158,7 @@ async function reportToCoinbaseCDP(transactionData) {
             headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${jwt}`,
-                'X-Project-ID': FACILITATOR_CONFIG.cdpProjectId
+                'X-Project-ID': CDP_PROJECT_ID // Dari env
             },
             timeout: 10000,
             validateStatus: (status) => status < 500
@@ -158,22 +179,23 @@ async function reportToCoinbaseCDP(transactionData) {
 }
 
 // =================================================================
-// EXECUTE USDC TRANSFER (Tidak ada perubahan)
+// EXECUTE USDC TRANSFER (Dimodifikasi untuk env vars)
 // =================================================================
 async function executeUSDCTransfer(authorization, signature) {
     const { from, to, value, validAfter, validBefore, nonce } = authorization;
 
     console.log('💸 Processing USDC transfer:', { from, to, value });
 
-    // --- TAMBAHAN: Cek jika wallet gagal dibuat saat cold start ---
+    // --- Cek on-demand ---
     if (!backendWallet) {
         console.warn('Wallet not initialized. Retrying on-demand...');
         try {
             if (!RELAYER_PRIVATE_KEY) {
                 throw new Error('FATAL: RELAYER_PRIVATE_KEY env var not set');
             }
-            if (!provider) { // Jika provider juga gagal
-                provider = new JsonRpcProvider(FACILITATOR_CONFIG.cdpRpcUrl);
+            if (!provider) { 
+                if (!CDP_RPC_URL) throw new Error("CDP_RPC_URL not set");
+                provider = new JsonRpcProvider(CDP_RPC_URL); // Dari env
             }
             backendWallet = new Wallet(RELAYER_PRIVATE_KEY, provider);
             console.log('✅ Wallet initialized on-demand.');
@@ -184,7 +206,7 @@ async function executeUSDCTransfer(authorization, signature) {
     }
     // --- AKHIR TAMBAHAN ---
 
-    // Kode asli Anda
+    // ... (sisa logika tidak berubah) ...
     if (!backendWallet) {
         throw new Error('Backend wallet not configured');
     }
@@ -252,7 +274,7 @@ async function executeUSDCTransfer(authorization, signature) {
 }
 
 // =================================================================
-// MINT NFT (Tidak ada perubahan)
+// MINT NFT (Dimodifikasi untuk env vars)
 // =================================================================
 async function mintNFT(recipientAddress) {
     console.log('🎨 Minting NFT to:', recipientAddress);
@@ -264,26 +286,27 @@ async function mintNFT(recipientAddress) {
     try {
         const nftContract = new Contract(NFT_CONTRACT_ADDRESS, NFT_ABI, backendWallet);
         
-        // --- TAMBAHAN: Cek jika provider gagal ---
         let currentProvider = provider;
         if (!currentProvider) {
             console.warn('Provider not initialized. Retrying on-demand...');
             try {
-                currentProvider = new JsonRpcProvider(FACILITATOR_CONFIG.cdpRpcUrl);
+                if (!CDP_RPC_URL) throw new Error("CDP_RPC_URL not set");
+                currentProvider = new JsonRpcProvider(CDP_RPC_URL); // Dari env
                 console.log('✅ Provider initialized on-demand.');
             } catch (initError) {
                 console.error('❌ FATAL: On-demand provider init failed:', initError.message);
                 throw new Error('Provider initialization failed on-demand');
             }
         }
-        // --- AKHIR TAMBAHAN ---
 
-        const balance = await currentProvider.getBalance(backendWallet.address); // Menggunakan currentProvider
+        const balance = await currentProvider.getBalance(backendWallet.address); 
         console.log('⛽ Gas balance:', (Number(balance) / 1e18).toFixed(4), 'ETH');
 
         if (balance < BigInt(1e15)) {
             throw new Error('Insufficient gas in backend wallet');
         }
+        
+        // ... (sisa logika tidak berubah) ...
 
         const tx = await nftContract.mint(recipientAddress, 1, { gasLimit: 200000 });
         console.log('📝 Mint tx:', tx.hash);
@@ -341,7 +364,7 @@ async function mintNFT(recipientAddress) {
 }
 
 // =================================================================
-// NETLIFY HANDLER (Tidak ada perubahan)
+// NETLIFY HANDLER (Dimodifikasi untuk env vars)
 // =================================================================
 exports.handler = async (event) => {
     const headers = {
@@ -360,12 +383,12 @@ exports.handler = async (event) => {
 
     const xPaymentHeader = event.headers['x-payment'] || event.headers['X-Payment'];
 
-    // BLOK GET INI SEKARANG AMAN KARENA 'require' SUDAH BENAR
+    // BLOK GET INI SEKARANG AMAN KARENA MENGGUNAKAN ENV VARS
     if (event.httpMethod === 'GET' || event.httpMethod === 'HEAD' || !xPaymentHeader) {
         
-        // Periksa apakah config ter-load
-        if (!FACILITATOR_CONFIG || !FACILITATOR_CONFIG.x402ServerId) {
-            console.error("❌ FATAL: facilitator-config.js tidak ter-load dengan benar!");
+        // Periksa apakah env vars ter-load
+        if (!X402_SERVER_ID || !CDP_PROJECT_ID) {
+            console.error("❌ FATAL: X402_SERVER_ID or CDP_PROJECT_ID env var not set!");
             return {
                 statusCode: 500,
                 headers,
@@ -387,8 +410,8 @@ exports.handler = async (event) => {
                 x402Version: 1,
                 error: "Payment Required",
                 message: "the hood runs deep in 402. Pay 1 USDC to mint NFT",
-                serverId: FACILITATOR_CONFIG.x402ServerId, // Ini sekarang akan berhasil
-                cdpProjectId: FACILITATOR_CONFIG.cdpProjectId, // Ini sekarang akan berhasil
+                serverId: X402_SERVER_ID, // Ini sekarang akan berhasil
+                cdpProjectId: CDP_PROJECT_ID, // Ini sekarang akan berhasil
                 provider: "Coinbase CDP",
                 accepts: [{
                     scheme: "exact",
@@ -415,6 +438,7 @@ exports.handler = async (event) => {
         };
     }
 
+    // ... (Blok POST/try-catch Anda di bawah ini tidak perlu diubah) ...
     try {
         const payloadJson = Buffer.from(xPaymentHeader, 'base64').toString('utf8');
         const payload = JSON.parse(payloadJson);
