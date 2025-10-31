@@ -267,7 +267,8 @@ async function executeUSDCTransfer(authorization, signature) {
             }
         }
 
-        // Verify EIP-712 signature server-side before attempting transfer
+        // Verify EIP-712 signature server-side before attempting transfer.
+        // Try a few normalization variants for signatures (base64 vs hex, missing v byte, v as 0/1)
         try {
             const network = await provider.getNetwork();
             const chainId = network.chainId;
@@ -290,34 +291,65 @@ async function executeUSDCTransfer(authorization, signature) {
                 ]
             };
 
-            const valueObj = {
-                from,
-                to,
-                value,
-                validAfter,
-                validBefore,
-                nonce
-            };
+            const valueObj = { from, to, value, validAfter, validBefore, nonce };
 
-            const recovered = await verifyTypedData(domain, types, valueObj, sigHex);
-            console.log('🔎 Signature recovered address:', recovered);
+            // Build candidate signatures to try
+            const candidates = [];
+            if (typeof sigHex === 'string') candidates.push(sigHex);
+
+            // If signature is 65 bytes without v (130 hex chars), append v=0x1b/0x1c (27/28)
+            try {
+                const raw = sigHex.startsWith('0x') ? sigHex.slice(2) : sigHex;
+                if (raw.length === 130) {
+                    candidates.push('0x' + raw + '1b');
+                    candidates.push('0x' + raw + '1c');
+                }
+                // if v is 00/01, convert to 27/28
+                if (raw.length === 132) {
+                    const v = parseInt(raw.slice(-2), 16);
+                    if (v === 0 || v === 1) {
+                        const v27 = (v + 27).toString(16).padStart(2, '0');
+                        candidates.push('0x' + raw.slice(0, 130) + v27);
+                    }
+                }
+            } catch (e) {
+                // ignore
+            }
+
+            let recovered = null;
+            let matchedCandidate = null;
+            for (const c of candidates) {
+                try {
+                    recovered = await verifyTypedData(domain, types, valueObj, c);
+                    if (recovered) {
+                        matchedCandidate = c;
+                        break;
+                    }
+                } catch (e) {
+                    // try next candidate
+                }
+            }
+
+            if (!recovered) {
+                // final attempt: try using original sigHex as-is once more to get a specific error
+                try {
+                    await verifyTypedData(domain, types, valueObj, sigHex);
+                } catch (finalErr) {
+                    // surface friendly message
+                    throw new Error('Payment failed: invalid signature (client signature did not match payer address)');
+                }
+            }
+
+            console.log('🔎 Signature recovered address:', recovered, 'candidateUsed:', matchedCandidate ? matchedCandidate.slice(0, 10) + '...' : 'original');
             if (recovered.toLowerCase() !== from.toLowerCase()) {
                 const err = new Error(`Payment failed: invalid signature (recovered ${recovered} != expected ${from})`);
                 err.original = new Error('FiatTokenV2: invalid signature');
                 throw err;
             }
         } catch (verr) {
-            // If verification error, surface a friendly message
-            if (verr.message && verr.message.includes('Failed to parse')) {
-                console.warn('Warning: signature parse issue:', verr.message);
-            }
-            if (verr.message && verr.message.includes('invalid signature')) {
-                throw new Error('Payment failed: invalid signature (client signature did not match payer address)');
-            }
-            // If it's a verifyTypedData or provider error, propagate a friendly message
-            if (verr.message && !verr.message.toLowerCase().includes('payer has insufficient')) {
-                throw new Error(verr.message);
-            }
+            // Provide a friendly error message for signature problems
+            console.error('Signature verification failed:', verr.message);
+            throw new Error('Payment failed: invalid signature (client signature did not match payer address)');
         }
 
         const sig = Signature.from(sigHex);
