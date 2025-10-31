@@ -293,18 +293,21 @@ async function mintNFT(recipientAddress) {
 }
 
 // =================================================================
-// NETLIFY HANDLER
+// NETLIFY HANDLER (NO EXPRESS)
 // =================================================================
 exports.handler = async (event) => {
     // CORS
+    const headers = {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Content-Type, X-Payment',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS'
+    };
+
     if (event.httpMethod === 'OPTIONS') {
         return {
             statusCode: 204,
-            headers: {
-                'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Headers': 'Content-Type, X-Payment',
-                'Access-Control-Allow-Methods': 'GET, POST, OPTIONS'
-            }
+            headers
         };
     }
 
@@ -314,6 +317,7 @@ exports.handler = async (event) => {
     if (event.httpMethod === 'GET' || !xPaymentHeader) {
         return {
             statusCode: 402,
+            headers: { ...headers, 'Cache-Control': 'no-cache' },
             body: JSON.stringify({
                 x402Version: 1,
                 error: "Payment Required",
@@ -339,12 +343,7 @@ exports.handler = async (event) => {
                         poweredBy: "Coinbase CDP + x402"
                     }
                 }]
-            }),
-            headers: {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*',
-                'Cache-Control': 'no-cache'
-            }
+            })
         };
     }
 
@@ -358,16 +357,16 @@ exports.handler = async (event) => {
         if (!payload.x402Version || payload.x402Version !== 1) {
             return {
                 statusCode: 400,
-                body: JSON.stringify({ success: false, error: "Invalid x402 version" }),
-                headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+                headers,
+                body: JSON.stringify({ success: false, error: "Invalid x402 version" })
             };
         }
 
         if (!payload.payload?.authorization || !payload.payload?.signature) {
             return {
                 statusCode: 400,
-                body: JSON.stringify({ success: false, error: "Missing authorization or signature" }),
-                headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+                headers,
+                body: JSON.stringify({ success: false, error: "Missing authorization or signature" })
             };
         }
 
@@ -407,6 +406,7 @@ exports.handler = async (event) => {
 
         return {
             statusCode: 200,
+            headers,
             body: JSON.stringify({
                 success: true,
                 message: "Payment received and NFT minted! 🎉",
@@ -420,11 +420,7 @@ exports.handler = async (event) => {
                     timestamp: new Date().toISOString(),
                     cdpReported: true
                 }
-            }),
-            headers: { 
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            }
+            })
         };
 
     } catch (error) {
@@ -438,8 +434,8 @@ exports.handler = async (event) => {
 
         return {
             statusCode,
-            body: JSON.stringify({ success: false, error: error.message }),
-            headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+            headers,
+            body: JSON.stringify({ success: false, error: error.message })
         };
     }
 };
