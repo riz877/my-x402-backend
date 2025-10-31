@@ -389,8 +389,25 @@ exports.handler = async (event) => {
     // register the resource. Include serverId/cdpProjectId only if set.
     if (event.httpMethod === 'GET' || event.httpMethod === 'HEAD' || !xPaymentHeader) {
 
-        const requestedPath = event.path || event.rawPath || '/';
-        const resource = `https://${event.headers.host}${requestedPath}`;
+        // Determine the public host/path that the caller used. Netlify and
+        // proxies may set forwarding headers; prefer those so the descriptor
+        // reports the pretty URL (e.g. /mint) rather than the internal
+        // function path.
+        const host = event.headers['x-forwarded-host'] || event.headers['x-original-host'] || event.headers['host'];
+
+        const forwardedPath = event.path || event.rawPath || event.headers['x-nf-path'] || event.headers['x-original-url'] || event.headers['x-forwarded-path'] || '/';
+        // Some proxies include the full URL in x-original-url; if so, extract pathname
+        let pathOnly = forwardedPath;
+        try {
+            if (typeof forwardedPath === 'string' && forwardedPath.startsWith('http')) {
+                const u = new URL(forwardedPath);
+                pathOnly = u.pathname + (u.search || '');
+            }
+        } catch (e) {
+            // ignore and use forwardedPath as-is
+        }
+
+        const resource = `https://${host}${pathOnly}`;
 
         if (!X402_SERVER_ID || !CDP_PROJECT_ID) {
             console.warn("⚠️ Optional env vars X402_SERVER_ID or CDP_PROJECT_ID not set. Returning 402 without CDP metadata.");
@@ -470,6 +487,14 @@ exports.handler = async (event) => {
 
         if (X402_SERVER_ID) body.serverId = X402_SERVER_ID;
         if (CDP_PROJECT_ID) body.cdpProjectId = CDP_PROJECT_ID;
+
+        // Log the final descriptor so Netlify logs show exactly what we
+        // returned (useful when scanners fetch the URL).
+        try {
+            console.log('x402 descriptor:', JSON.stringify(body));
+        } catch (e) {
+            console.log('x402 descriptor (stringify failed)');
+        }
 
         return {
             statusCode: 402,
