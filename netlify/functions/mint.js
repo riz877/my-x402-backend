@@ -22,8 +22,7 @@ if (RELAYER_PRIVATE_KEY) {
 // ABIs
 const USDC_ABI = [
     'function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s) external',
-    'function balanceOf(address account) view returns (uint256)',
-    'event Transfer(address indexed from, address indexed to, uint256 value)'
+    'function balanceOf(address account) view returns (uint256)'
 ];
 
 const NFT_ABI = [
@@ -33,11 +32,10 @@ const NFT_ABI = [
 ];
 
 const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
-
 const processedAuthorizations = new Set();
 
 // =================================================================
-// GENERATE JWT TOKEN UNTUK COINBASE CDP API
+// GENERATE COINBASE CDP JWT TOKEN
 // =================================================================
 function generateCoinbaseJWT() {
     try {
@@ -53,7 +51,7 @@ function generateCoinbaseJWT() {
             iss: 'coinbase-cloud',
             aud: ['api.developer.coinbase.com'],
             nbf: now,
-            exp: now + 120, // Valid for 2 minutes
+            exp: now + 120,
             iat: now
         };
 
@@ -61,10 +59,8 @@ function generateCoinbaseJWT() {
         const encodedPayload = Buffer.from(JSON.stringify(payload)).toString('base64url');
         const message = `${encodedHeader}.${encodedPayload}`;
 
-        // Decode private key from base64
         const privateKeyBuffer = Buffer.from(FACILITATOR_CONFIG.cdpPrivateKey, 'base64');
         
-        // Sign with ES256 (ECDSA with P-256 and SHA-256)
         const sign = crypto.createSign('SHA256');
         sign.update(message);
         sign.end();
@@ -77,25 +73,24 @@ function generateCoinbaseJWT() {
 
         return `${message}.${signature}`;
     } catch (error) {
-        console.error('❌ JWT generation error:', error);
+        console.error('❌ JWT error:', error.message);
         return null;
     }
 }
 
 // =================================================================
-// REPORT TRANSACTION KE COINBASE CDP
+// REPORT TO COINBASE CDP
 // =================================================================
 async function reportToCoinbaseCDP(transactionData) {
     try {
-        console.log('📡 Reporting to Coinbase CDP Platform...');
+        console.log('📡 Reporting to Coinbase CDP...');
         
         const jwt = generateCoinbaseJWT();
         if (!jwt) {
-            console.error('Failed to generate JWT token');
+            console.warn('⚠️ JWT generation failed - skipping CDP report');
             return { success: false, error: 'JWT generation failed' };
         }
 
-        // Coinbase Platform API - Transaction logging
         const endpoint = `${FACILITATOR_CONFIG.cdpApiUrl}/v1/projects/${FACILITATOR_CONFIG.cdpProjectId}/events`;
         
         const payload = {
@@ -121,8 +116,6 @@ async function reportToCoinbaseCDP(transactionData) {
             }
         };
 
-        console.log('📤 Sending to:', endpoint);
-
         const response = await axios.post(endpoint, payload, {
             headers: {
                 'Content-Type': 'application/json',
@@ -130,26 +123,19 @@ async function reportToCoinbaseCDP(transactionData) {
                 'X-Project-ID': FACILITATOR_CONFIG.cdpProjectId
             },
             timeout: 10000,
-            validateStatus: (status) => status >= 200 && status < 500 // Accept all non-5xx
+            validateStatus: (status) => status < 500
         });
 
         if (response.status >= 400) {
             console.warn(`⚠️ CDP returned ${response.status}:`, response.data);
-            return { success: false, status: response.status, data: response.data };
+            return { success: false, status: response.status };
         }
 
-        console.log('✅ Coinbase CDP logged successfully');
+        console.log('✅ CDP reported successfully');
         return { success: true, data: response.data };
 
     } catch (error) {
-        if (error.response) {
-            console.error('❌ CDP API error:', {
-                status: error.response.status,
-                data: error.response.data
-            });
-        } else {
-            console.error('❌ CDP error:', error.message);
-        }
+        console.error('❌ CDP report failed:', error.response?.data || error.message);
         return { success: false, error: error.message };
     }
 }
@@ -158,55 +144,47 @@ async function reportToCoinbaseCDP(transactionData) {
 // EXECUTE USDC TRANSFER
 // =================================================================
 async function executeUSDCTransfer(authorization, signature) {
+    const { from, to, value, validAfter, validBefore, nonce } = authorization;
+
+    console.log('💸 Processing USDC transfer:', { from, to, value });
+
+    if (!backendWallet) {
+        throw new Error('Backend wallet not configured');
+    }
+
+    const authKey = `${from}-${nonce}`.toLowerCase();
+    if (processedAuthorizations.has(authKey)) {
+        throw new Error('Authorization already processed');
+    }
+
+    if (BigInt(value) < BigInt(MINT_PRICE)) {
+        throw new Error(`Insufficient amount: ${value}, required: ${MINT_PRICE}`);
+    }
+
+    if (to.toLowerCase() !== PAYMENT_RECIPIENT.toLowerCase()) {
+        throw new Error('Invalid payment recipient');
+    }
+
     try {
-        const { from, to, value, validAfter, validBefore, nonce } = authorization;
-
-        console.log('💸 Executing USDC transfer:', { from, to, value, nonce });
-
-        if (!backendWallet) {
-            throw new Error('Backend wallet not configured');
-        }
-
         const usdcContract = new Contract(USDC_ADDRESS, USDC_ABI, backendWallet);
-
-        // Check if already processed
-        const authKey = `${from}-${nonce}`.toLowerCase();
-        if (processedAuthorizations.has(authKey)) {
-            throw new Error('Authorization already processed');
-        }
-
-        // Verify amount
-        if (BigInt(value) < BigInt(MINT_PRICE)) {
-            throw new Error(`Insufficient amount: ${value}, required: ${MINT_PRICE}`);
-        }
-
-        // Verify recipient
-        if (to.toLowerCase() !== PAYMENT_RECIPIENT.toLowerCase()) {
-            throw new Error('Invalid payment recipient');
-        }
-
-        // Parse signature
         const sig = Signature.from(signature);
         const { v, r, s } = sig;
 
-        // Execute transfer
-        console.log('🔄 Calling transferWithAuthorization...');
         const tx = await usdcContract.transferWithAuthorization(
             from, to, value, validAfter, validBefore, nonce, v, r, s
         );
 
-        console.log('📝 Transfer tx sent:', tx.hash);
+        console.log('📝 Transfer tx:', tx.hash);
         const receipt = await tx.wait();
-        console.log('✅ Transfer confirmed in block:', receipt.blockNumber);
+        console.log('✅ Confirmed in block:', receipt.blockNumber);
 
         processedAuthorizations.add(authKey);
 
-        // 🆕 Report to Coinbase CDP
+        // Report to CDP
         await reportToCoinbaseCDP({
             type: 'payment',
             txHash: receipt.hash,
-            from: from,
-            to: to,
+            from, to, 
             amount: value,
             asset: USDC_ADDRESS,
             blockNumber: receipt.blockNumber,
@@ -222,13 +200,12 @@ async function executeUSDCTransfer(authorization, signature) {
         };
 
     } catch (error) {
-        console.error('❌ USDC transfer error:', error);
+        console.error('❌ Transfer failed:', error.message);
         
         await reportToCoinbaseCDP({
             type: 'payment',
-            from: authorization.from,
-            to: authorization.to,
-            amount: authorization.value,
+            from, to,
+            amount: value,
             asset: USDC_ADDRESS,
             status: 'failed',
             error: error.message
@@ -242,28 +219,27 @@ async function executeUSDCTransfer(authorization, signature) {
 // MINT NFT
 // =================================================================
 async function mintNFT(recipientAddress) {
+    console.log('🎨 Minting NFT to:', recipientAddress);
+
+    if (!backendWallet) {
+        throw new Error('Backend wallet not configured');
+    }
+
     try {
-        console.log('🎨 Minting NFT to:', recipientAddress);
-
-        if (!backendWallet) {
-            throw new Error('Backend wallet not configured');
-        }
-
         const nftContract = new Contract(NFT_CONTRACT_ADDRESS, NFT_ABI, backendWallet);
 
         const balance = await provider.getBalance(backendWallet.address);
-        console.log('⛽ Backend wallet balance:', (Number(balance) / 1e18).toFixed(4), 'ETH');
+        console.log('⛽ Gas balance:', (Number(balance) / 1e18).toFixed(4), 'ETH');
 
         if (balance < BigInt(1e15)) {
             throw new Error('Insufficient gas in backend wallet');
         }
 
-        console.log('🔄 Calling mint function...');
         const tx = await nftContract.mint(recipientAddress, 1, { gasLimit: 200000 });
-
-        console.log('📝 Mint tx sent:', tx.hash);
+        console.log('📝 Mint tx:', tx.hash);
+        
         const receipt = await tx.wait();
-        console.log('✅ Mint confirmed in block:', receipt.blockNumber);
+        console.log('✅ Minted in block:', receipt.blockNumber);
 
         // Extract token ID
         let tokenId;
@@ -283,12 +259,12 @@ async function mintNFT(recipientAddress) {
             tokenId = totalSupply.toString();
         }
 
-        // 🆕 Report to Coinbase CDP
+        // Report to CDP
         await reportToCoinbaseCDP({
             type: 'nft_mint',
             txHash: receipt.hash,
             recipient: recipientAddress,
-            tokenId: tokenId,
+            tokenId,
             nftContract: NFT_CONTRACT_ADDRESS,
             blockNumber: receipt.blockNumber,
             status: 'confirmed'
@@ -302,7 +278,7 @@ async function mintNFT(recipientAddress) {
         };
 
     } catch (error) {
-        console.error('❌ Mint error:', error);
+        console.error('❌ Mint failed:', error.message);
         
         await reportToCoinbaseCDP({
             type: 'nft_mint',
@@ -317,9 +293,10 @@ async function mintNFT(recipientAddress) {
 }
 
 // =================================================================
-// MAIN HANDLER
+// NETLIFY HANDLER
 // =================================================================
 exports.handler = async (event) => {
+    // CORS
     if (event.httpMethod === 'OPTIONS') {
         return {
             statusCode: 204,
@@ -333,6 +310,7 @@ exports.handler = async (event) => {
 
     const xPaymentHeader = event.headers['x-payment'] || event.headers['X-Payment'];
 
+    // GET: Return 402 Payment Required
     if (event.httpMethod === 'GET' || !xPaymentHeader) {
         return {
             statusCode: 402,
@@ -354,32 +332,11 @@ exports.handler = async (event) => {
                     payTo: PAYMENT_RECIPIENT,
                     asset: USDC_ADDRESS,
                     maxTimeoutSeconds: 3600,
-                    outputSchema: {
-                        input: { 
-                            type: "http", 
-                            method: "POST",
-                            properties: {
-                                x402Version: { type: "number" },
-                                payload: {
-                                    type: "object",
-                                    properties: {
-                                        signature: { type: "string" },
-                                        authorization: { type: "object" }
-                                    }
-                                }
-                            }
-                        },
-                        output: { 
-                            success: "boolean",
-                            data: { type: "object" }
-                        }
-                    },
                     extra: {
-                        name: "USD Coin",
                         contractAddress: NFT_CONTRACT_ADDRESS,
                         paymentAddress: PAYMENT_RECIPIENT,
                         autoMint: true,
-                        poweredBy: "Coinbase CDP"
+                        poweredBy: "Coinbase CDP + x402"
                     }
                 }]
             }),
@@ -391,6 +348,7 @@ exports.handler = async (event) => {
         };
     }
 
+    // POST: Process Payment
     try {
         const payloadJson = Buffer.from(xPaymentHeader, 'base64').toString('utf8');
         const payload = JSON.parse(payloadJson);
@@ -417,20 +375,18 @@ exports.handler = async (event) => {
         const userAddress = authorization.from;
 
         console.log('👤 User:', userAddress);
-        console.log('💰 Amount:', authorization.value, 'USDC');
+        console.log('💰 Amount:', authorization.value);
 
-        // Step 1: USDC Transfer
-        console.log('\n=== STEP 1: USDC TRANSFER ===');
+        // Step 1: Transfer
+        console.log('\n=== STEP 1: TRANSFER ===');
         const transferResult = await executeUSDCTransfer(authorization, signature);
-        console.log('✅ Transfer:', transferResult.txHash);
 
-        // Step 2: NFT Mint
-        console.log('\n=== STEP 2: NFT MINT ===');
+        // Step 2: Mint
+        console.log('\n=== STEP 2: MINT ===');
         const mintResult = await mintNFT(userAddress);
-        console.log('✅ Mint: Token #', mintResult.tokenId);
 
         // Step 3: Final Report
-        console.log('\n=== STEP 3: FINAL REPORT ===');
+        console.log('\n=== STEP 3: REPORT ===');
         await reportToCoinbaseCDP({
             type: 'complete_transaction',
             txHash: mintResult.txHash,
@@ -447,7 +403,7 @@ exports.handler = async (event) => {
             status: 'success'
         });
 
-        console.log('🎉 Transaction complete!');
+        console.log('🎉 Complete!');
 
         return {
             statusCode: 200,
@@ -462,7 +418,7 @@ exports.handler = async (event) => {
                     mintTx: mintResult.txHash,
                     blockNumber: mintResult.blockNumber,
                     timestamp: new Date().toISOString(),
-                    provider: "Coinbase CDP"
+                    cdpReported: true
                 }
             }),
             headers: { 
@@ -472,7 +428,7 @@ exports.handler = async (event) => {
         };
 
     } catch (error) {
-        console.error("❌ Error:", error);
+        console.error("❌ Error:", error.message);
         
         let statusCode = 500;
         if (error.message.includes('already processed')) statusCode = 409;
