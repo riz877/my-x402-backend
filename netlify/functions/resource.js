@@ -1,10 +1,10 @@
 // File: netlify/functions/mint.js
 const { JsonRpcProvider, Wallet, Contract } = require('ethers');
 
-const NFT_CONTRACT_ADDRESS = "0xaa1b03eea35b55d8c15187fe8f57255d4c179113";
-const PAYMENT_ADDRESS = "0xD95A8764AA0dD4018971DE4Bc2adC09193b8A3c2";
+const NFT_CONTRACT_ADDRESS = "0x03657531f55ab9b03f5aef07d1af79c070e50366";
+const PAYMENT_ADDRESS = "0x2e6e06f71786955474d35293b09a3527debbbfce";
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-const MINT_PRICE = "2000000"; // 2 USDC
+const MINT_PRICE = "1000000"; // 2 USDC
 
 const provider = new JsonRpcProvider(process.env.PROVIDER_URL || "https://mainnet.base.org");
 const wallet = new Wallet(process.env.RELAYER_PRIVATE_KEY, provider);
@@ -47,7 +47,7 @@ exports.handler = async (event) => {
             body: JSON.stringify({
                 x402Version: 1,
                 error: "Payment Required",
-                message: "Pay 2 USDC to mint your NFT",
+                message: "Pay 1 USDC to mint your NFT",
                 accepts: [{
                     scheme: "exact",
                     network: "base",

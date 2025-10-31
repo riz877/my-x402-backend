@@ -1,8 +1,8 @@
 const { JsonRpcProvider, Wallet, Contract, Signature } = require('ethers');
 
 // --- KONFIGURASI ---
-const NFT_CONTRACT_ADDRESS = "0xaa1b03eea35b55d8c15187fe8f57255d4c179113"; // Kontrak NFT Anda
-const PAYMENT_RECIPIENT = "0xD95A8764AA0dD4018971DE4Bc2adC09193b8A3c2"; // Dompet Anda
+const NFT_CONTRACT_ADDRESS = "0x03657531f55ab9b03f5aef07d1af79c070e50366"; // Kontrak NFT Anda
+const PAYMENT_RECIPIENT = "0x2e6e06f71786955474d35293b09a3527debbbfce"; // Dompet Anda
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"; // USDC di Base
 const MINT_PRICE = "10000"; // 0.10 USDC (karena 6 desimal)
 const WIN_CHANCE_PERCENT = 2; // 50% Peluang menang

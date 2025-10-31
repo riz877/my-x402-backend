@@ -21,7 +21,7 @@ app.get('/api/resource', (req, res) => {
     mimeType: "application/json", // The data type sent after payment
     
     // !!! CHANGE THIS TO YOUR WALLET ADDRESS !!!
-    payTo: "0xD95A8764AA0dD4018971DE4Bc2adC09193b8A3c2", 
+    payTo: "0x2e6e06f71786955474d35293b09a3527debbbfce", 
     
     maxTimeoutSeconds: 600, // Payment is valid for 10 minutes
     
